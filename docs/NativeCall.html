@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NativeCall: native ARM code for 68k Amiga programs</title>
+<style>
+  @page { size: A4; margin: 20mm 19mm 20mm 19mm; }
+  :root { --ink:#1b2430; --muted:#5a6675; --line:#d5dbe3; --accent:#0b5cad; --tint:#eef4fb; --warn:#fdf5e6; }
+  * { box-sizing: border-box; }
+  body { font: 10.6pt/1.5 "Segoe UI", Arial, sans-serif; color: var(--ink); margin: 0; }
+  h1 { font-size: 30pt; line-height: 1.1; margin: 0 0 6pt; color: var(--accent); }
+  h2 { font-size: 16pt; margin: 22pt 0 7pt; color: var(--accent); break-after: avoid; }
+  h3 { font-size: 11.6pt; margin: 13pt 0 4pt; break-after: avoid; }
+  p { margin: 0 0 8pt; }
+  ul, ol { margin: 0 0 8pt; padding-left: 17pt; }
+  li { margin-bottom: 3pt; }
+  code { font: 9.3pt Consolas, monospace; background: #f1f3f6; padding: 0 2.5pt; border-radius: 2pt; }
+  pre { font: 8.8pt/1.4 Consolas, monospace; background: #f4f6f9; border: 1px solid var(--line); border-radius: 4pt;
+        padding: 8pt 10pt; margin: 0 0 9pt; break-inside: avoid; white-space: pre-wrap; }
+  pre code { background: none; padding: 0; font: inherit; }
+  table { border-collapse: collapse; width: 100%; margin: 0 0 10pt; font-size: 9.6pt; break-inside: avoid; }
+  th { text-align: left; background: var(--tint); border-bottom: 1.5px solid var(--accent); padding: 4pt 6pt; }
+  td { border-bottom: 1px solid var(--line); padding: 3.5pt 6pt; vertical-align: top; }
+  .n { text-align: right; white-space: nowrap; }
+  .lead { font-size: 12.5pt; color: var(--muted); margin-bottom: 14pt; }
+  .box { background: var(--tint); border-left: 3pt solid var(--accent); padding: 8pt 11pt; margin: 0 0 10pt; break-inside: avoid; }
+  .warn { background: var(--warn); border-left-color: #c98a12; }
+  .box p:last-child { margin-bottom: 0; }
+  figure { margin: 0 0 10pt; break-inside: avoid; text-align: center; }
+  figure img { max-width: 58%; border: 1px solid var(--line); }
+  figcaption { font-size: 8.9pt; color: var(--muted); margin-top: 3pt; }
+  svg { width: 100%; height: auto; display: block; }
+  svg text { font-family: "Segoe UI", Arial, sans-serif; }
+  .meta { color: var(--muted); font-size: 9.6pt; }
+  .pb { break-before: page; }
+</style>
+</head>
+<body>
+
+<h1>NativeCall</h1>
+<p class="lead">Native ARM code for 68k Amiga programs on a PiStorm with a Raspberry Pi 4, without changing Emu68.</p>
+<p class="meta">Version 1.5.0: <code>nativecall.library</code> 1.5, hypervisor 4. November 2026.</p>
+
+<h2>What it is</h2>
+<p>A PiStorm replaces the Amiga's 68000-class CPU with a Raspberry Pi. Emu68 runs on the Pi and translates 68k code to
+ARM code as it goes, which makes an A1200 far faster than any real 68k. But the program still only uses what a
+68k has. It cannot reach the NEON vector unit, the ARM CRC32 instruction, or the other cores of the Pi.</p>
+<p>NativeCall lets a 68k program hand its heavy calculations to native ARM code. The model is the one PowerPC accelerator
+cards used with WarpOS and PowerUP:</p>
+<ul>
+  <li><b>The 68k program stays an ordinary AmigaOS program.</b> Everything that talks to the operating system stays there.</li>
+  <li><b>The computing functions, called <i>kernels</i>, run on ARM.</b> They work only on memory they are given, and return a result.</li>
+  <li><b>Every program still runs on every Amiga.</b> You write a kernel once, and the SDK compiles it twice: for the Pi and as a 68k fallback. Without NativeCall the fallback runs.</li>
+</ul>
+
+<div class="box"><p><b>Nothing in Emu68 is changed.</b> NativeCall is one file on the SD card, one line in <code>config.txt</code>, and a
+shared library. Commenting out that one line returns the machine to how it was.</p></div>
+
+<h2>What it gains</h2>
+<p>Measured on one A1200 with a PiStorm32-lite and an 8 GB Pi 4.</p>
+<table>
+  <tr><th>Workload</th><th class="n">68k (Emu68 JIT)</th><th class="n">Native</th><th class="n">Gain</th></tr>
+  <tr><td>CRC32 of 4 MB, ARM CRC32 instruction</td><td class="n">52.11 ms</td><td class="n">2.38 ms</td><td class="n"><b>21.9x</b></td></tr>
+  <tr><td>4x4 matrix × 10 000 vertices, NEON</td><td class="n">1.01 ms</td><td class="n">0.11 ms</td><td class="n"><b>9.2x</b></td></tr>
+  <tr><td>Mandelbrot zoom, NEON on 3 cores</td><td class="n">3.2 fps</td><td class="n">27.1 fps</td><td class="n"><b>8.8x</b> (iterations/s)</td></tr>
+  <tr><td>Adler32 of 4 MB, NEON</td><td class="n">19.86 ms</td><td class="n">2.77 ms</td><td class="n"><b>7.2x</b></td></tr>
+  <tr><td>Software 3D torus, 1 core</td><td class="n">44.6 fps</td><td class="n">169.3 fps</td><td class="n"><b>3.8x</b></td></tr>
+  <tr><td>Same plain C code, 1 core</td><td class="n"></td><td class="n"></td><td class="n">1.4x to 2.4x</td></tr>
+  <tr><td>GPU-limited demo (Boing Ocean)</td><td class="n">55.3 fps</td><td class="n">55.8 fps</td><td class="n">+0.9%</td></tr>
+</table>
+<p>Two lessons sit in this table. Emu68's JIT is already good, so plain C gains only about 2x: the large gains come
+from what the 68k has no equivalent of. And a program whose frame time goes to the GPU gains almost nothing, because
+the CPU was not what held it back.</p>
+
+<figure>
+  <img src="images/mandeldemo.png" alt="Mandelbrot demo showing iterations per second for each mode">
+  <figcaption><code>mandeldemo</code> on the A1200. The top lines compare the modes in millions of iterations per second.</figcaption>
+</figure>
+
+<h2>How it works</h2>
+<h3>Background: exception levels</h3>
+<p>An ARM processor has privilege levels. Applications run at EL0, an operating system at EL1, a hypervisor at EL2.
+Code at a higher level can arrange to be told when a lower level does certain things: this is called a <i>trap</i>. Emu68
+normally drops to EL1 and leaves EL2 empty. NativeCall lives in that empty level.</p>
+
+<h3>The pieces</h3>
+<svg viewBox="0 0 720 330" role="img" aria-label="A 68k program calls nativecall.library, which executes CPUSHL. Emu68 at EL1 turns it into dc civac, which traps to the hypervisor at EL2. The hypervisor runs native kernels on core 0 and on helper cores 1 and 3.">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#5a6675"/></marker></defs>
+  <rect x="10" y="10" width="205" height="310" rx="6" fill="#f4f6f9" stroke="#d5dbe3"/>
+  <text x="112" y="30" text-anchor="middle" font-size="13" font-weight="600" fill="#1b2430">Amiga side (68k)</text>
+  <rect x="28" y="48" width="170" height="72" rx="5" fill="#fff" stroke="#0b5cad"/>
+  <text x="113" y="72" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1b2430">Your program</text>
+  <text x="113" y="91" text-anchor="middle" font-size="11" fill="#5a6675">nc_call, nc_run,</text>
+  <text x="113" y="106" text-anchor="middle" font-size="11" fill="#5a6675">nc_run_mp, nc_start_mp</text>
+  <rect x="28" y="162" width="170" height="86" rx="5" fill="#fff" stroke="#0b5cad"/>
+  <text x="113" y="185" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1b2430">nativecall.library</text>
+  <text x="113" y="204" text-anchor="middle" font-size="11" fill="#5a6675">64-byte call block</text>
+  <text x="113" y="219" text-anchor="middle" font-size="11" fill="#5a6675">doorbell in D0 and D1</text>
+  <text x="113" y="234" text-anchor="middle" font-size="11" fill="#5a6675">CPUSHL DC,(A0)</text>
+  <path d="M113 120V160" stroke="#5a6675" stroke-width="1.5" marker-end="url(#a)"/>
+  <rect x="245" y="10" width="465" height="310" rx="6" fill="#eef4fb" stroke="#d5dbe3"/>
+  <text x="477" y="30" text-anchor="middle" font-size="13" font-weight="600" fill="#1b2430">Raspberry Pi 4</text>
+  <rect x="263" y="48" width="430" height="46" rx="5" fill="#fff" stroke="#5a6675"/>
+  <text x="478" y="67" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1b2430">EL1: Emu68 JIT on core 0</text>
+  <text x="478" y="84" text-anchor="middle" font-size="11" fill="#5a6675">translates CPUSHL into the ARM instruction dc civac</text>
+  <rect x="263" y="130" width="430" height="60" rx="5" fill="#0b5cad"/>
+  <text x="478" y="153" text-anchor="middle" font-size="12.5" font-weight="600" fill="#fff">EL2: the hypervisor (the armstub)</text>
+  <text x="478" y="172" text-anchor="middle" font-size="11" fill="#fff">HCR_EL2.TPC traps dc civac; checks the doorbell, validates, runs kernels</text>
+  <path d="M478 94V128" stroke="#5a6675" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="486" y="116" font-size="11" fill="#5a6675">trap</text>
+  <path d="M198 205H240C252 205 252 71 261 71" fill="none" stroke="#5a6675" stroke-width="1.5" marker-end="url(#a)"/>
+  <rect x="263" y="226" width="136" height="78" rx="5" fill="#fff" stroke="#0b5cad"/>
+  <text x="331" y="250" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1b2430">Kernel, core 0</text>
+  <text x="331" y="269" text-anchor="middle" font-size="11" fill="#5a6675">the 68k waits</text>
+  <text x="331" y="284" text-anchor="middle" font-size="11" fill="#5a6675">nc_call, nc_run</text>
+  <rect x="410" y="226" width="136" height="78" rx="5" fill="#fff" stroke="#0b5cad"/>
+  <text x="478" y="250" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1b2430">Kernel, cores 1, 3</text>
+  <text x="478" y="269" text-anchor="middle" font-size="11" fill="#5a6675">Emu68's idle cores</text>
+  <text x="478" y="284" text-anchor="middle" font-size="11" fill="#5a6675">nc_run_mp, nc_start_mp</text>
+  <rect x="557" y="226" width="136" height="78" rx="5" fill="#fff" stroke="#b6bfca" stroke-dasharray="4 3"/>
+  <text x="625" y="250" text-anchor="middle" font-size="12.5" font-weight="600" fill="#5a6675">Core 2</text>
+  <text x="625" y="269" text-anchor="middle" font-size="11" fill="#5a6675">PiStorm housekeeper</text>
+  <text x="625" y="284" text-anchor="middle" font-size="11" fill="#5a6675">left alone</text>
+  <path d="M331 190V224M478 190V224" stroke="#5a6675" stroke-width="1.5" marker-end="url(#a)"/>
+</svg>
+
+<h3>1. Getting in: the armstub</h3>
+<p>The Pi firmware starts a small program, the <i>armstub</i>, before the kernel. A line in <code>config.txt</code> can replace it, and this is
+a standard firmware feature. Ours copies the hypervisor to RAM above 4 GB, which Emu68 does not use on an 8 GB Pi, and starts Emu68 at EL1 with one
+trap enabled: <code>HCR_EL2.TPC</code>, which sends the ARM cache instruction <code>dc civac</code> to EL2.</p>
+
+<h3>2. Making a request</h3>
+<p>The 68k cannot call EL2 directly, but it can execute <code>CPUSHL DC,(A0)</code>, a normal 68040 cache instruction. Emu68 translates that into
+<code>dc civac</code>, which traps. So a request looks like this:</p>
+<ol>
+  <li>The library fills a 64-byte call block in Fast RAM: which operation, which function, which parameters.</li>
+  <li>It loads the doorbell values into D0 and D1. Emu68 keeps those 68k registers in fixed ARM registers, where the hypervisor can read them.</li>
+  <li>It executes <code>CPUSHL DC,(A0)</code> in supervisor mode.</li>
+  <li>The hypervisor does the work and writes the result and a status into the block.</li>
+</ol>
+<p>A round trip costs about 5.5 µs. Without the hypervisor, <code>CPUSHL</code> is only a cache flush: the status stays 0, and the library
+knows to use the 68k code. There is no exception and nothing to configure.</p>
+
+<div class="box"><p><b>Why a doorbell?</b> The first version recognized requests by a magic word in memory. Our own binaries contain that word,
+so when a network driver flushed a DMA buffer where it fell on a 64-byte boundary, the hypervisor wrote a "reply" into network data, and the
+Amiga reset. Now every other <code>dc civac</code> is only redone on its physical address, and memory is never looked at without the register values.</p></div>
+
+<h3>3. Running native code safely</h3>
+<ul>
+  <li>The function must be an entry of a checked module; the hypervisor does not jump to arbitrary addresses.</li>
+  <li>All of Emu68's floating point and vector registers are saved first, because they hold live 68k state.</li>
+  <li>Kernels get their own memory map that leaves out the low 16 MB: chip RAM and hardware registers. A bad pointer ends the call with <code>NC_ST_FAULT</code> and the machine goes on. An endless loop, however, does lock it.</li>
+  <li>Emu68 runs AArch64 in big-endian mode, so kernels are built <code>-mbig-endian</code> and 68k data needs no conversion.</li>
+</ul>
+
+<h3>4. Keeping the Amiga responsive</h3>
+<p>Emu68 checks for 68k interrupts between translated blocks. While a kernel runs on core 0, sound, input and multitasking wait, so a call should stay around 1 ms.
+<code>nc_run</code> cuts a job into pieces of about 0.5 ms. The hypervisor measures each piece with the ARM counter, and the library learns the
+right size for each kernel. In the 3D demo this kept the longest call at 752 µs.</p>
+
+<h3>5. Using the idle cores</h3>
+<p>Emu68 leaves cores 1 and 3 asleep in a <code>wfe</code> loop. Taking them without patching Emu68 took a small trick. Emu68 overwrites the register that
+controls <code>wfe</code> trapping when a core starts, but only adds to the one controlling performance counter traps. So the hypervisor sets that one
+(<code>MDCR_EL2.TPM</code>) first. The first thing the core does in Emu68 is touch a performance counter; that traps, and only then does the hypervisor turn on
+<code>wfe</code> trapping (<code>HCR_EL2.TWE</code>). From there on, each idle <code>wfe</code> arrives in the hypervisor, which gives the core work if there is any.</p>
+<p>All cores take pieces from one atomic counter. A core that is busy with something else simply takes none, and nobody waits for it. Each
+core gets its own copy of the parameters, with its piece in them, and the results are added up.</p>
+
+<h3>6. Asynchronous jobs</h3>
+<p><code>nc_start_mp</code> gives a job to the helper cores and returns after about 8 µs. The 68k carries on, with interrupts and multitasking running.
+<code>nc_wait</code> collects the result; if the job has not finished, core 0 helps in steps of at most 0.5 ms. In a test, a job finished in half
+the single-core time while the 68k never stopped.</p>
+
+<h2>Using it</h2>
+<h3>Install</h3>
+<ol>
+  <li>Back up <code>config.txt</code> from the SD card's FAT partition.</li>
+  <li>Copy <code>nativecall-armstub.bin</code> to that partition, and add <code>armstub=nativecall-armstub.bin</code> below <code>arm_64bit=1</code>.</li>
+  <li>Copy <code>nativecall.library</code> to <code>LIBS:</code>.</li>
+  <li>Power the Amiga off and on. Run <code>hello LOOP=1000 FAULT</code> to check.</li>
+</ol>
+<div class="box warn"><p><b>Pi 4 with 8 GB only.</b> The hypervisor's address is above 4 GB, so on a Pi with less RAM this armstub gives a black screen. Put a <code>#</code>
+in front of the line, using a PC if necessary, and the machine is back as it was.</p></div>
+
+<h3>Write a kernel</h3>
+<pre><code>/* myprog_kernels.h: seen by both sides */
+struct ScaleParams {
+    struct NCRange range;   /* [from, to) */
+    NC_U32 samples;         /* a 68k address */
+    NC_S32 factor;
+};
+#define MYPROG_KERNELS(K) K(scale)
+NC_DECLARE(myprog, MYPROG_KERNELS)
+
+/* myprog_kernels.c: compiled for ARM and for the 68k */
+NC_KERNEL(scale)
+{
+    struct ScaleParams *p = params;
+    NC_S16 *s = NC_PTR(NC_S16, p->samples);
+    for (NC_U32 i = p->range.from; i &lt; p->range.to; i++)
+        s[i] = (NC_S16)((s[i] * p->factor) >> 8);
+    return 0;
+}
+NC_MODULE(myprog, MYPROG_KERNELS)
+
+/* main.c: an ordinary AmigaOS program */
+struct NCKernels *k = nc_open(&amp;myprog_kernels);
+struct ScaleParams *p = nc_alloc(sizeof(*p));
+/* ... */
+nc_run_mp(k, NCK_scale, p, sizeof(*p), 0, count);
+nc_close(k);</code></pre>
+<p>Everything builds in Docker, with VBCC or GCC on the 68k side. The module is embedded in the program, so it remains one file.</p>
+<pre><code>sdk/nc image             # once
+sdk/nc new myprog
+cd myprog
+../sdk/nc make           # VBCC
+../sdk/nc make CC68=gcc  # GCC</code></pre>
+
+<h3>Choosing a call</h3>
+<table>
+  <tr><th>Call</th><th>Runs on</th><th>The 68k</th><th>Use for</th><th class="n">Fixed cost</th></tr>
+  <tr><td><code>nc_call</code></td><td>core 0</td><td>waits</td><td>one short job</td><td class="n">5.5 µs</td></tr>
+  <tr><td><code>nc_run</code></td><td>core 0</td><td>waits, runs between pieces</td><td>a big job on one core</td><td class="n">7 µs</td></tr>
+  <tr><td><code>nc_run_mp</code></td><td>cores 0, 1, 3</td><td>waits, runs between calls</td><td>a big job with independent parts</td><td class="n">11 µs</td></tr>
+  <tr><td><code>nc_start_mp</code></td><td>cores 1, 3</td><td><b>goes on</b></td><td>a job whose result can wait</td><td class="n">15 µs with wait</td></tr>
+</table>
+
+<h3>What makes a good kernel</h3>
+<ul>
+  <li><b>Send batches.</b> In an OpenMoHAA port, one call per model surface gained 0.4 ms per frame. The same work as one batch per draw list took the game from 23.1 to 27.8 fps.</li>
+  <li><b>Use what the 68k lacks:</b> NEON, special instructions, several cores.</li>
+  <li><b>Look for CPU-limited work.</b> Software rendering, audio decoding and checksums gain. GPU-limited drawing does not.</li>
+  <li><b>Rules:</b> no AmigaOS calls; only Fast RAM above 16 MB; no writes to the parameters and only to your own output range under <code>nc_run_mp</code>; less than 32 KB of local variables.</li>
+</ul>
+
+<h2>How it was tested</h2>
+<p><b>In QEMU, before hardware.</b> An unmodified Emu68 boots under the hypervisor on QEMU's Pi 3 model, and a bare 68k program exercises each request: spoofed blocks, ping, cache sync,
+native calls, caught faults, invalid entries, 1000-call loops, core capture, shared jobs, asynchronous jobs and full job slots. QEMU needed a small patch to trap <code>wfe</code>
+as real cores do. It proves the protocol but not the speed, and it has no Pi 4 firmware, GIC or RAM above 4 GB.</p>
+<p><b>On the A1200.</b> Example programs check results against the 68k version, count which core did what, verify the allocator on both sides, and measure call costs. During
+5 million native calls, 5 × 16 MB were copied over the network with matching checksums while Workbench kept responding.</p>
+<p><b>In WinUAE.</b> With no hypervisor, and with and without the library, programs from both compilers took the 68k path with correct results.</p>
+<p>Bugs found this way shaped the design: a black screen on the first boot from a skipped cache flush, the phantom requests described above, wrong results from a
+code model that assumed page alignment, and a saved processor state overwritten by a native fault. They are written up in <code>NOTES.md</code>.</p>
+
+<h2>Limitations</h2>
+<ul>
+  <li>Only the 8 GB Pi 4 is supported, and all hardware results come from one machine.</li>
+  <li>An endless loop in a kernel locks the machine. There is no stack guard (64 KB per core).</li>
+  <li>If a program crashes during an asynchronous job, a helper core may write to freed memory.</li>
+  <li>Three cores at full load heat a Pi 4 past 80 °C without cooling, and it slows down: the Mandelbrot demo dropped from 27 to 24 fps.</li>
+  <li><code>async_log</code> and <code>ppc_enable</code> with several cores are understood from the Emu68 source but have not been tested.</li>
+</ul>
+
+<h2>More</h2>
+<table>
+  <tr><td><code>README.md</code></td><td>overview, build, tests</td></tr>
+  <tr><td><code>INSTALL.md</code></td><td>installation, rollback, verification</td></tr>
+  <tr><td><code>sdk/README.md</code></td><td>the API, kernel rules, adding it to an existing project</td></tr>
+  <tr><td><code>RESULTS.md</code></td><td>all measurements</td></tr>
+  <tr><td><code>NOTES.md</code></td><td>technical notes with Emu68 source references</td></tr>
+</table>
+
+</body>
+</html>

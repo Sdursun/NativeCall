@@ -1,0 +1,52 @@
+==id $Id: nativecall_lib.sfd 1.0 (29.10.2026) $
+* nativecall.library - native AArch64 calls for 68k programs on Emu68
+* (nativecall armstub on the Pi's SD card). See sdk/README.md.
+==base _NativeCallBase
+==basetype struct Library *
+==libname nativecall.library
+==bias 30
+==public
+==include <exec/types.h>
+==include <nativecall/nc_abi.h>
+==version 1
+* TRUE if native calls work on this machine
+BOOL NC_Available() ()
+* Load a .narm module (Fast RAM above 16 MB, 4 KB aligned, I-cache synced)
+APTR NC_LoadModule(CONST_STRPTR name) (a0)
+VOID NC_UnloadModule(APTR module) (a0)
+* Address of entry 'index' of a module, NULL if out of range
+APTR NC_GetEntry(APTR module, ULONG index) (a0,d0)
+* Run an entry once; 0xFFFFFFFF on error
+ULONG NC_Call(APTR entry, APTR params) (a0,a1)
+* Same, *status receives NC_ST_* (nc_abi.h); status may be NULL
+ULONG NC_CallStatus(APTR entry, APTR params, ULONG * status) (a0,a1,a2)
+* Run an entry over [from, to) in pieces of about 0.5 ms; params starts with
+* struct NCRange { ULONG from, to; }. Returns the sum of the results.
+ULONG NC_Run(APTR entry, APTR params, ULONG from, ULONG to, ULONG * status) (a0,a1,d0,d1,a2)
+* Memory native code can see (Fast RAM above 16 MB), cleared
+APTR NC_AllocMem(ULONG size) (d0)
+VOID NC_FreeMem(APTR memory, ULONG size) (a1,d0)
+* Hypervisor statistics, 8 ULONGs (NC_INFO_* in nc_abi.h)
+BOOL NC_GetInfo(ULONG * info) (a0)
+* Last native fault: ESR, FAR, ELR (low 32 bits), 3 ULONGs
+VOID NC_LastFault(ULONG * fault) (a0)
+* 1.2: load a module from memory (a copy embedded in the program); the image is copied
+APTR NC_LoadModuleMem(CONST_APTR image, ULONG size) (a0,d0)
+* 1.2: native run time of one kernel entry (needs hypervisor 2+); reset clears it after reading.
+* FALSE if there are no measurements for this entry.
+BOOL NC_GetKernelStats(APTR entry, struct NCKernelStats * stats, BOOL reset) (a0,a1,d0)
+* 1.4: NC_Run on all ARM cores Emu68 leaves free (hypervisor 3+; otherwise it is NC_Run).
+* Each core gets its own copy of the first params_size bytes of params with its piece in
+* the NCRange: the kernel must not write its params, and the pieces must be independent.
+ULONG NC_RunMP(APTR entry, APTR params, ULONG from, ULONG to, ULONG * status, ULONG params_size) (a0,a1,d0,d1,a2,d2)
+* 1.4: ARM cores NC_RunMP uses (1 + helper cores), 0 without native calls
+ULONG NC_Cores() ()
+* 1.5: start NC_RunMP on the helper cores and return at once (hypervisor 4+). Returns a job
+* handle, or 0 if it could not start (then use NC_RunMP). chunk 0: the learned piece size.
+* The 68k must not touch the job's input or output until NC_WaitJob returns.
+ULONG NC_StartMP(APTR entry, APTR params, ULONG from, ULONG to, ULONG params_size, ULONG chunk) (a0,a1,d0,d1,d2,d3)
+* 1.5: TRUE when the job is complete (no request, reads memory)
+BOOL NC_JobDone(ULONG job) (d0)
+* 1.5: wait for the job, return the sum of its results; status may be NULL
+ULONG NC_WaitJob(ULONG job, ULONG * status) (d0,a0)
+==end

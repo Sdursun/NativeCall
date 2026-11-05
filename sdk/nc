@@ -1,0 +1,82 @@
+#!/bin/bash
+# nc - nativecall SDK command (Git Bash on Windows, Linux, macOS). Everything runs in Docker.
+#
+#   nc new <name> [dir]     new project from the template (default dir: ./<name>)
+#   nc make [args]          build the project in the current directory
+#                           (make CC68=gcc, make narm, make clean, ...)
+#   nc sdk                  build the SDK itself: headers + build/nativecall.library
+#   nc image                build the Docker image (once; also after SDK updates)
+#   nc shell                interactive shell in the build container, project mounted
+#
+# The image is nativecall-sdk:1 (sdk/docker/Dockerfile). Results land in the project's
+# build/<compiler>/ directory: the program and its .narm module.
+
+set -e
+IMAGE=nativecall-sdk:1
+SDK=$(cd "$(dirname "$0")" && pwd)
+export MSYS_NO_PATHCONV=1
+
+winpath() { if command -v cygpath >/dev/null; then cygpath -m "$1"; else echo "$1"; fi; }
+
+run() {
+    local tty=""
+    [ -t 0 ] && [ "$1" = bash ] && tty="-it"
+    docker run --rm $tty -v "$(winpath "$SDK"):/sdk" -v "$(winpath "$PWD"):/work" -w /work \
+        -e NC_SDK=/sdk "$IMAGE" "$@"
+}
+
+need_docker() {
+    command -v docker >/dev/null || { echo "nc: Docker is not installed (https://www.docker.com)" >&2; exit 1; }
+    docker info >/dev/null 2>&1 || { echo "nc: Docker is not running - start Docker Desktop and try again" >&2; exit 1; }
+}
+
+need_image() {
+    need_docker
+    docker image inspect "$IMAGE" >/dev/null 2>&1 || {
+        echo "Docker image $IMAGE missing: building it once (a few minutes)..."
+        docker build -t "$IMAGE" "$(winpath "$SDK/docker")"
+    }
+}
+
+case "$1" in
+    new)
+        name=$2
+        dir=${3:-$name}
+        if [[ ! "$name" =~ ^[a-z_][a-z0-9_]*$ ]]; then
+            echo "usage: nc new <name> [dir]   (name: lower case C identifier)" >&2
+            exit 1
+        fi
+        [ -e "$dir" ] && { echo "$dir exists" >&2; exit 1; }
+        mkdir -p "$dir"
+        uname=$(echo "$name" | tr a-z A-Z)
+        sdkrel=$(realpath --relative-to="$dir" "$SDK")
+        subst() { sed -e "s/@NAME@/$name/g" -e "s/@UNAME@/$uname/g" -e "s|@SDKREL@|$sdkrel|g" "$1" > "$2"; }
+        subst "$SDK/template/Makefile"  "$dir/Makefile"
+        subst "$SDK/template/main.c"    "$dir/main.c"
+        subst "$SDK/template/kernels.h" "$dir/${name}_kernels.h"
+        subst "$SDK/template/kernels.c" "$dir/${name}_kernels.c"
+        echo "Created $dir: main.c, ${name}_kernels.h, ${name}_kernels.c, Makefile"
+        echo "Build:   cd $dir && $SDK/nc make            (or: nc make CC68=gcc)"
+        ;;
+    make)
+        shift
+        need_image
+        run make "$@"
+        ;;
+    sdk)
+        need_image
+        (cd "$SDK" && run make -C /sdk)
+        ;;
+    image)
+        need_docker
+        docker build -t "$IMAGE" "$(winpath "$SDK/docker")"
+        ;;
+    shell)
+        need_image
+        run bash
+        ;;
+    *)
+        sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+        exit 1
+        ;;
+esac

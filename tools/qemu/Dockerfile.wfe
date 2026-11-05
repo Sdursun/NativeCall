@@ -1,0 +1,12 @@
+# Emu68 build image + QEMU 8.2.2 built from source with WFE trapping (wfe-trap.py), for the
+# hypervisor's helper cores (qemu/README.md). docker build -t nativecall-qemu:2 -f Dockerfile.wfe .
+FROM emu68-build:ubuntu24
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential ninja-build \
+        python3 python3-venv pkg-config libglib2.0-dev libpixman-1-dev flex bison wget xz-utils \
+        ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY wfe-trap.py /tmp/
+RUN cd /tmp && wget -q https://download.qemu.org/qemu-8.2.2.tar.xz && tar xf qemu-8.2.2.tar.xz \
+    && python3 /tmp/wfe-trap.py qemu-8.2.2 \
+    && cd qemu-8.2.2 && ./configure --target-list=aarch64-softmmu --disable-docs --disable-werror \
+        --disable-gtk --disable-sdl --disable-vnc --disable-opengl --disable-slirp --prefix=/usr/local \
+    && make -j$(nproc) && make install && cd / && rm -rf /tmp/qemu-8.2.2*

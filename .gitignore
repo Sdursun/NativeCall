@@ -1,0 +1,8 @@
+build/
+build-led/
+build-qemu/
+dist/
+*.o
+*.elf
+*.narm
+qemu/build/
