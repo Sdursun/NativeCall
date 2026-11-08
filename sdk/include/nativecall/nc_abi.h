@@ -65,8 +65,9 @@ struct NCBlock
 #define NC_OP_WAIT      7   /* hypervisor 4+: result of a START job */
 
 #define NC_PING_REPLY   NC_FOURCC('N','A','R','M')
-#define NC_HV_VERSION   4   /* 2: CALL replies carry the native run time, 3: NC_OP_RUNMP,
-                               4: NC_OP_START / NC_OP_WAIT */
+#define NC_HV_VERSION   5   /* 2: CALL replies carry the native run time, 3: NC_OP_RUNMP,
+                               4: NC_OP_START / NC_OP_WAIT, 5: placed from the device tree
+                               (no change for the 68k) */
 
 /* Status */
 #define NC_ST_NONE      0x00    /* nobody processed the block: no hypervisor */

@@ -50,7 +50,8 @@ running translated code, and x12-x29 and v19-v26 are `-ffixed` for the compiler 
 - **Memory Emu68 takes for itself:** the very top of the last `/memory` block: MMU table pool, JIT, then
   the kernel moves itself there (`src/aarch64/mmu.c:268-290`, `start.c:1319-1322, 1434`).
 - **On an 8 GB Pi 4 the RAM above 4 GB** is otherwise unused, never given to the 68k (`0xF2000000`
-  limit). The hypervisor lives there, at `0x1_0000_0000`.
+  limit). Hypervisors 1–4 lived there, at `0x1_0000_0000`; hypervisor 5 takes the top 2 MB of Emu68's RAM
+  from the device tree instead (section 25).
 
 ## 4. Opcodes (for the record; not used by the final design)
 
@@ -114,7 +115,7 @@ docker run --rm -v <Emu68>:/src:ro -v emu68-orig-build:/build -w /build emu68-bu
 4. `HCR_EL2.TPC` (bit 23) sends EL1's `DC CIVAC/CVAC/IVAC` to EL2. `CPUSHL DC,(An)` on the 68k becomes
    exactly that.
 
-**Memory:** the resident part goes to `0x1_0000_0000`. It runs its own EL2 MMU: an identity map (Normal
+**Memory:** the resident part went to `0x1_0000_0000` (hypervisor 5: the top of RAM, section 25). It runs its own EL2 MMU: an identity map (Normal
 WB, inner shareable, as EL1, so caches stay coherent), `SCTLR_EL2.EE = 1`, no WXN, `CPTR_EL2.TFP = 0`.
 The low 16 MB are not mapped, so native access to chip RAM faults. Incoming addresses are translated
 with `AT S1E1R` + `PAR_EL1`.
@@ -282,7 +283,7 @@ idle otherwise; 2 = PiStorm housekeeper; 3 = PowerPC with `ppc_enable`, idle oth
 - Emu68 sets up the secondary EL1 MMU at EL2 (`_sec_leave_EL2`), so these cores must enter at EL2.
 - It writes `HCR_EL2` outright (`TWE` cannot be set in advance), but ORs into `MDCR_EL2` and never touches
   `VBAR_EL2`.
-- So cores 1 and 3 go through `boot.S` → `hv_secondary` (`HV_BASE + 4`), which sets up the EL2 MMU (same
+- So cores 1 and 3 go through `boot.S` → `hv_secondary` (hypervisor base + 4), which sets up the EL2 MMU (same
   tables; nothing is read from memory before the MMU is on), stack, `TPIDR_EL2`, `VBAR_EL2`, `CPTR_EL2` and
   `MDCR_EL2.TPM`. Then Emu68's own code runs.
 - `secondary_boot`'s first PMU access (`PMCR_EL0`) traps. The hypervisor sets `HCR_EL2.TWE`, clears `TPM`,
@@ -357,10 +358,74 @@ calls under GCC: the kernel took 618 µs instead of 82 µs. They now use 32-bit 
 Boing Ocean (ogles2.library example) with its CPU work as a kernel: 55.3 → 55.8 fps. The GPU sets the frame
 rate; see RESULTS.md.
 
+## 25. Any RAM size: the hypervisor finds its place in the device tree (hypervisor 5)
+
+**Problem:** the hypervisor was fixed at `0x1_0000_0000`. A Pi 4 with 1, 2 or 4 GB has no RAM there: black screen.
+
+**What Emu68 does (`af63580`):**
+- It learns its RAM only from the `reg` of the first `memory` / `memory@...` node (`mmu.c:243`, `devicetree.c:259`).
+- It takes its own memory **from the top of the last block**: MMU pool, JIT (`mmu.c:268-290`), then the kernel's
+  32 MB (`start.c:1319`). That top must be 2 MB aligned.
+- The framebuffer comes from the block ending below 1 GB; if the last block is a different one, it is not touched.
+- At boot the 32 MB from where the kernel was loaded are in use (`start.c:806-831`), so a fixed low address is not
+  safe. The top of the first block depends on `gpu_mem`; a hole cannot be cut in the middle of a block.
+- `linux,initrd-start` is read as 32 bits (`start.c:1134`).
+
+**Solution:**
+- `hv_fdt.c` runs in `boot.S`, MMU off, little-endian. It takes `HV_RESERVE` (2 MB) from the last block and writes
+  one size cell of its `reg`. It refuses and writes nothing for: a bad header, no memory node, size 0, an unaligned
+  top, a block that is too small, RAM outside 8 GB, or a region overlapping the DTB or the initrd.
+- **When it refuses:** Emu68 starts as with the stock armstub (secondary cores see `hv_base == 0`). No native calls,
+  programs take their 68k path, no black screen. With `DEBUG_LED=1` the reason shows on the LED: a long flash, then
+  one short flash per status code.
+- **The hypervisor is position independent:** `-fPIE -mcmodel=tiny`, symbols through `adr`. The Makefile links it
+  at 0 and at 2 MB and compares the two. 8720 bytes, `0x59000` with bss; the linker checks that it fits in
+  `HV_RESERVE`.
+- **The EL2 map comes from the real RAM:** `gb_mask` (in `x3`). The old map assumed 8 GB, which allowed speculative
+  accesses to RAM that is not there. The maintenance alias follows the same mask.
+- `boot.S`: the `hv_base` word is at `0xd0` (in the page the firmware reserves with `/memreserve/`), stack at
+  `0x70000`.
+- On the A1200 the hypervisor lands at `0x7FE00000` and the 68k sees 2 MB less Fast RAM. `NC_HV_VERSION` 5;
+  nothing changes for the 68k, the library is the same.
+
+**QEMU** (`qemu/test_all.py` checks everything; `qemu/run.sh fdt` the parser alone, 16/16):
+
+| Scenario | Machine | Expected and result |
+|---|---|---|
+| `base` | raspi3b, raspi4b | no hypervisor, status 0 |
+| `hv` | raspi3b, raspi4b | loader + hypervisor, all tests; top of RAM 2 MB lower |
+| `refuse` | raspi3b, raspi4b | status 0, top of RAM unchanged |
+| `stub` | raspi4b | **the real armstub**, all cores from 0 at EL3; all tests |
+| `stubrefuse` | raspi4b | the real armstub, initrd at the top of RAM: refused, status 0 |
+
+- `nativecall-qemu:3` (`tools/qemu/Dockerfile.qemu9`): QEMU 9.2 `raspi4b` with three patches (`qemu9-patch.py`):
+  the `wfe` trap; RAM in one node with two blocks, as the firmware writes it; initrd values as 32 bits. Booted
+  stock, Emu68 reports the same RAM limits as on the A1200 (`0x3a9fffff`, `0x79dfffff`), so this is the A1200
+  layout.
+- **A bug the test caught:** the mask was passed in `x2`, which `hv_entry` overwrote. The 1 GB layout did not show
+  it; in the Pi 4 layout the hypervisor was outside its own map. So `raspi3b` alone is not enough.
+- The `stub` test does the firmware's job: files in RAM, `dtb_ptr32` and `kernel_entry32` filled in, `0xf0` clear.
+
+**Not tried on hardware, and QEMU does not show:**
+- The real Pi 4 firmware on other RAM sizes: where it puts the DTB and initrd, and whether `reg` has the expected
+  form. On an overlap it refuses, so the bad case is "no native calls".
+- Caches (QEMU does not model them). The DTB write and the copy happen with the MMU off.
+- 1, 4, 8 GB without `total_mem`: parser tests only, not with Emu68. These layouts were written from memory; the
+  only layout seen on hardware is 8 GB + `total_mem=2048`.
+
+### 25.1 Hypervisor 5 on the A1200
+
+- Pi powered off and on, normal boot. Total Fast RAM `1920991232` → `1918894080` (exactly 2 MB less, as expected).
+- `hello LOOP=1000 FAULT MP ASYNC`, GCC and VBCC: 1000 calls 0 errors, copy ok, fault caught (ESR `0x96000006`,
+  FAR 4), asynchronous job ok, `nc_run` 174.9 ms, `nc_run_mp` on 3 cores 66.1 ms (2.65x), no units missing.
+- `bench` (GCC release build, first time on the A1200): all checks ok. Adler32 NEON 6.2x, CRC32 instruction 15.7x,
+  matrices NEON 11.6x. Temperature 46–49 °C.
+- No real test on a 1, 2 or 4 GB Pi yet.
+
 ## Known limitations and open work
 
-- Only the Pi 4 with 8 GB is supported and tested: the hypervisor's address is above 4 GB. Other sizes need
-  either a separate build plus `total_mem` or detection through the DTB.
+- Only the 8 GB Pi 4 has been tested on hardware. Hypervisor 5 handles other sizes (section 25), tested in
+  QEMU only.
 - All hardware results come from one machine.
 - An endless loop in a kernel locks the machine (core 0) or that helper.
 - There is no stack guard (64 KB per core).

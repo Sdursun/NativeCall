@@ -39,7 +39,7 @@
 
 <h1>NativeCall</h1>
 <p class="lead">Native ARM code for 68k Amiga programs on a PiStorm with a Raspberry Pi 4, without changing Emu68.</p>
-<p class="meta">Version 1.5.0: <code>nativecall.library</code> 1.5, hypervisor 4. November 2026.</p>
+<p class="meta">Version 1.6.0: <code>nativecall.library</code> 1.5, hypervisor 5. November 2026.</p>
 
 <h2>What it is</h2>
 <p>A PiStorm replaces the Amiga's 68000-class CPU with a Raspberry Pi. Emu68 runs on the Pi and translates 68k code to
@@ -126,7 +126,7 @@ normally drops to EL1 and leaves EL2 empty. NativeCall lives in that empty level
 
 <h3>1. Getting in: the armstub</h3>
 <p>The Pi firmware starts a small program, the <i>armstub</i>, before the kernel. A line in <code>config.txt</code> can replace it, and this is
-a standard firmware feature. Ours copies the hypervisor to RAM above 4 GB, which Emu68 does not use on an 8 GB Pi, and starts Emu68 at EL1 with one
+a standard firmware feature. Ours takes the top 2 MB of RAM out of the device tree, so Emu68 never sees them, copies the hypervisor there, and starts Emu68 at EL1 with one
 trap enabled: <code>HCR_EL2.TPC</code>, which sends the ARM cache instruction <code>dc civac</code> to EL2.</p>
 
 <h3>2. Making a request</h3>
@@ -179,8 +179,8 @@ the single-core time while the 68k never stopped.</p>
   <li>Copy <code>nativecall.library</code> to <code>LIBS:</code>.</li>
   <li>Power the Amiga off and on. Run <code>hello LOOP=1000 FAULT</code> to check.</li>
 </ol>
-<div class="box warn"><p><b>Pi 4 with 8 GB only.</b> The hypervisor's address is above 4 GB, so on a Pi with less RAM this armstub gives a black screen. Put a <code>#</code>
-in front of the line, using a PC if necessary, and the machine is back as it was.</p></div>
+<div class="box warn"><p><b>Tested on an 8 GB Pi 4.</b> The hypervisor finds its place in the device tree, so other RAM sizes should work (tested in QEMU), and if the
+layout is unexpected Emu68 simply starts without native calls. To go back, put a <code>#</code> in front of the line, using a PC if necessary.</p></div>
 
 <h3>Write a kernel</h3>
 <pre><code>/* myprog_kernels.h: seen by both sides */
@@ -234,9 +234,9 @@ cd myprog
 </ul>
 
 <h2>How it was tested</h2>
-<p><b>In QEMU, before hardware.</b> An unmodified Emu68 boots under the hypervisor on QEMU's Pi 3 model, and a bare 68k program exercises each request: spoofed blocks, ping, cache sync,
+<p><b>In QEMU, before hardware.</b> An unmodified Emu68 boots under the hypervisor on QEMU's Pi 3 and Pi 4 models, also started by the real armstub the way the firmware does it, and a bare 68k program exercises each request: spoofed blocks, ping, cache sync,
 native calls, caught faults, invalid entries, 1000-call loops, core capture, shared jobs, asynchronous jobs and full job slots. QEMU needed a small patch to trap <code>wfe</code>
-as real cores do. It proves the protocol but not the speed, and it has no Pi 4 firmware, GIC or RAM above 4 GB.</p>
+as real cores do. The device tree parser is tested alone on 16 layouts. QEMU proves the protocol but not the speed, and it has no real Pi 4 firmware, GIC or caches.</p>
 <p><b>On the A1200.</b> Example programs check results against the 68k version, count which core did what, verify the allocator on both sides, and measure call costs. During
 5 million native calls, 5 × 16 MB were copied over the network with matching checksums while Workbench kept responding.</p>
 <p><b>In WinUAE.</b> With no hypervisor, and with and without the library, programs from both compilers took the 68k path with correct results.</p>
@@ -245,7 +245,7 @@ code model that assumed page alignment, and a saved processor state overwritten 
 
 <h2>Limitations</h2>
 <ul>
-  <li>Only the 8 GB Pi 4 is supported, and all hardware results come from one machine.</li>
+  <li>All hardware results come from one machine, an 8 GB Pi 4. Other RAM sizes are tested in QEMU only.</li>
   <li>An endless loop in a kernel locks the machine. There is no stack guard (64 KB per core).</li>
   <li>If a program crashes during an asynchronous job, a helper core may write to freed memory.</li>
   <li>Three cores at full load heat a Pi 4 past 80 °C without cooling, and it slows down: the Mandelbrot demo dropped from 27 to 24 fps.</li>

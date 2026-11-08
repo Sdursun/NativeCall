@@ -3,14 +3,12 @@
 #define HV_CONFIG_H
 
 /*
-    Physical (= EL2 virtual) address of the resident hypervisor. On a Pi 4 with 8 GB this is
-    the start of RAM above 4 GB. Emu68 never hands it to the 68k (0xF2000000 limit) and takes
-    its own memory (kernel, JIT, MMU pool) from the top of the last block. See NOTES.md 3, 9.2.
-    Must be a multiple of 4 GB: boot.S loads it with a single movz.
+    The resident hypervisor is position independent and has no fixed address. boot.S takes HV_RESERVE
+    bytes off the top of the last /memory block of the device tree (hv_fdt.c) and copies it there:
+    Emu68 takes its own memory from the top of that same block, and never sees what is above the
+    new top (NOTES.md 3, 25). A multiple of 2 MB, because Emu68 needs its top of RAM aligned so.
 */
-#ifndef HV_BASE
-#define HV_BASE             0x100000000     /* the QEMU test (../qemu) overrides it */
-#endif
+#define HV_RESERVE          0x200000
 
 #define HV_STACK_SIZE       0x10000         /* EL2 stack of each core, native code runs on it */
 #define HV_STACK_SHIFT      16
@@ -54,10 +52,12 @@
 
 /*
     Boot progress on the green ACT LED (GPIO 42 on the Pi 4), build with DEBUG_LED=1:
-      1 long flash (1 s)   boot.S runs on core 0, about to copy the hypervisor above 4 GB
-      2 short flashes      hv_init runs from above 4 GB (copy worked, RAM there is usable)
+      1 long flash (1 s)   boot.S runs on core 0, about to read the device tree
+      2 short flashes      hv_init runs from its new place (copy worked, RAM there is usable)
       3 short flashes      EL2 MMU and caches are on
       LED off              entering Emu68 at EL1
+    Device tree refused: a second long flash, then one short flash per HV_FDT_* status (hv_fdt.h),
+    and Emu68 starts without the hypervisor.
     GPIO registers are little-endian: the big-endian hypervisor swaps.
 */
 #define GPIO_BASE           0xfe200000

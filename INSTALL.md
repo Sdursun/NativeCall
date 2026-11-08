@@ -8,15 +8,17 @@ The binaries named below are in `binaries/` of a release zip, or in `dist/` afte
 
 ## Requirements
 
-- PiStorm32-lite (or PiStorm32) + **Raspberry Pi 4 with 8 GB**. The hypervisor runs at physical
-  address `0x1_0000_0000`, above 4 GB. **On a Pi with less RAM this armstub leaves a black screen**,
-  because there is no RAM at that address (remove the `armstub=` line to recover). Only the 8 GB model
-  has been tested.
+- PiStorm32-lite (or PiStorm32) + **Raspberry Pi 4**. The hypervisor takes the top 2 MB of the RAM
+  that Emu68 would use (it reads and shortens the device tree), so the 68k sees 2 MB less Fast RAM.
+  If the device tree does not look as expected, the armstub starts Emu68 like the stock one, without
+  native calls (no black screen). Only the 8 GB model has been tested on hardware; 1, 2 and 4 GB
+  layouts in QEMU (NOTES.md 25).
+  - Hypervisor 4 and older (release 1.5.0) need the 8 GB model: they sit at `0x1_0000_0000`.
 - Emu68 1.1 (tested: `1.1.0-beta.1 git:0ba3a89`, raspi64/pistorm). The Emu68 file does not change.
 - `config.txt` must not have `enable_gic=0` (the Pi 4 default uses the GIC). If it does, build the
   stub with `make -C hypervisor GIC=0`.
-- A limit such as `total_mem=2048` is no problem: the hypervisor's RAM is not reported to any software
-  (tested).
+- A limit such as `total_mem=2048` is no problem (tested): the hypervisor's 2 MB are removed from the
+  device tree, so no other software uses them.
 - `async_log` and `ppc_enable` in `CMDLINE.TXT` should not stop anything: according to the Emu68
   source those cores still help while they are idle. This has not been tested.
 - A heatsink or fan is recommended: with three cores at full load a Pi 4 passes 80 °C and lowers its
@@ -57,10 +59,11 @@ their 68k versions (tested in WinUAE and on Emu68 without the armstub).
 
 | LED | Meaning |
 |---|---|
-| 1 long flash (1 s) | the stub runs |
-| 2 short flashes | the hypervisor was copied above 4 GB and runs from there |
+| 1 long flash (1 s) | the stub runs, about to read the device tree |
+| 2 short flashes | the hypervisor was copied to the top of RAM and runs from there |
 | 3 short flashes | EL2 MMU on |
 | off | Emu68 is starting |
+| a second long flash, then N short | the device tree was refused (N = `HV_FDT_*` status in `hypervisor/hv_fdt.h`); Emu68 starts without the hypervisor |
 
 It adds about 4 seconds to the boot; use the normal `nativecall-armstub.bin` in everyday use.
 
@@ -80,7 +83,8 @@ library is not installed at all, programs run too (again as 68k).
 | | |
 |---|---|
 | `nativecall.library` 1.5 | `NC_StartMP` / `NC_JobDone` / `NC_WaitJob`: jobs on the helper cores while the 68k goes on (with hypervisor 4; otherwise the job runs at once). |
-| armstub, hypervisor 4 | Asynchronous jobs (`NC_OP_START` / `NC_OP_WAIT`, 4 slots). This release. Tested in QEMU and on the A1200 (NOTES.md 23). |
+| armstub, hypervisor 5 | Placed from the device tree (any RAM size), no change for the 68k. This release. Tested in QEMU and on the A1200 (NOTES.md 25). |
+| armstub, hypervisor 4 | Asynchronous jobs (`NC_OP_START` / `NC_OP_WAIT`, 4 slots). Tested in QEMU and on the A1200 (NOTES.md 23). |
 | `nativecall.library` 1.4 | `NC_RunMP` / `NC_Cores`: work is shared with the ARM cores Emu68 leaves idle (with hypervisor 3; otherwise `NC_Run`). |
 | armstub, hypervisor 3 | Uses cores 1 and 3 for `NC_RunMP` (core 2 is Emu68's housekeeper and is left alone). |
 | `nativecall.library` 1.3 | `NC_Run` learns the piece size per kernel (NOTES.md 20). |
@@ -118,7 +122,7 @@ nc_run_mp  result 16384, status 0x1, units per core 0-3: 6142 5124 0 5118, missi
   housekeeper).
 - `missing` must always be 0.
 
-Asynchronous job with hypervisor 4 (`hello ASYNC`): `started`, units only on cores 1 and 3
+Asynchronous job with hypervisor 4 or newer (`hello ASYNC`): `started`, units only on cores 1 and 3
 (`0 8192 0 8192`), `missing 0`. With hypervisor 3 `ran at once` is normal.
 
 `cputest`, `bench`, `ncdemo` and `mandeldemo` work the same way (RESULTS.md).
@@ -127,4 +131,4 @@ Asynchronous job with hypervisor 4 (`hello ASYNC`): `started`, units only on cor
 
 Writing programs: **sdk/README.md** (SDK, `sdk/nc new`, kernel rules, VBCC/GCC). Building everything:
 `./build.sh` (Docker image `nativecall-sdk:1`, from `sdk/nc image`) gives `dist/`. Try hypervisor
-changes in QEMU first: `qemu/run.sh hv` (qemu/README.md).
+changes in QEMU first: `python3 qemu/test_all.py` (qemu/README.md).

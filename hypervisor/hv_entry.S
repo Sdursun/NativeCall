@@ -1,10 +1,12 @@
 /*
-    Resident EL2 part of the nativecall armstub. Linked at HV_BASE, big-endian data
+    Resident EL2 part of the nativecall armstub. Position independent (boot.S picks the place from
+    the device tree), big-endian data
     (instructions are always little-endian on AArch64).
 
-    HV_BASE + 0     hv_entry: once from boot.S on core 0 at EL2, x0 = DTB, x1 = kernel entry
-    HV_BASE + 4     hv_secondary: cores 1-3 at EL2 when Emu68 starts them, x0 = their entry
-    HV_BASE + 8     hv_secondary_spin: the spin-table loop itself (the QEMU test has no
+    base + 0        hv_entry: once from boot.S on core 0 at EL2, x0 = DTB, x1 = kernel entry,
+                    x3 = GBs holding RAM (hv_fdt.h)
+    base + 4        hv_secondary: cores 1-3 at EL2 when Emu68 starts them, x0 = their entry
+    base + 8        hv_secondary_spin: the spin-table loop itself (the QEMU test has no
                     boot.S for the secondary cores)
     hv_vectors      VBAR_EL2 of core 0 and of the helper cores
     nc_call_native  runs a native function with all FP/SIMD state saved, recovers from faults
@@ -28,23 +30,25 @@ hv_entry:
 
         mov     x19, x0                 /* DTB */
         mov     x20, x1                 /* kernel entry */
+        mov     x21, x3                 /* GBs holding RAM (hv_fdt_reserve_top); x2 is scratch above */
 
-        ldr     x2, =__stack_top
+        adr     x2, __stack_top
         mov     sp, x2
 
-        ldr     x2, =__bss_start
-        ldr     x3, =__bss_end
+        adr     x2, __bss_start
+        adr     x3, __bss_end
 1:      cmp     x2, x3
         b.hs    2f
         str     xzr, [x2], #8
         b       1b
 2:
-        ldr     x2, =hv_cpu             /* core 0's state */
+        adr     x2, hv_cpu             /* core 0's state */
         msr     TPIDR_EL2, x2
 
+        mov     x0, x21
         bl      hv_init                 /* page tables, EL2 MMU + caches */
 
-        ldr     x2, =hv_vectors
+        adr     x2, hv_vectors
         msr     VBAR_EL2, x2
 
         /* What Emu68's leave_EL2 would do (src/aarch64/start.c:184-201), plus our trap */
@@ -129,7 +133,7 @@ hv_secondary:
         msr     MAIR_EL2, x2
         ldr     x2, =TCR_EL2_VAL
         msr     TCR_EL2, x2
-        ldr     x2, =hv_l1
+        adr     x2, hv_l1
         msr     TTBR0_EL2, x2
         isb
         tlbi    alle2
@@ -146,16 +150,16 @@ hv_secondary:
         dsb     sy
         isb
 
-        ldr     x2, =hv_cpu
+        adr     x2, hv_cpu
         mov     x3, #CPU_SIZE
         madd    x2, x20, x3, x2
         msr     TPIDR_EL2, x2
-        ldr     x2, =hv_stacks
+        adr     x2, hv_stacks
         add     x3, x20, #1
         lsl     x3, x3, #HV_STACK_SHIFT
         add     x2, x2, x3
         mov     sp, x2
-        ldr     x2, =hv_vectors
+        adr     x2, hv_vectors
         msr     VBAR_EL2, x2
         ldr     x2, =CPTR_EL2_INIT
         msr     CPTR_EL2, x2
@@ -257,7 +261,7 @@ hv_panic:
         mrs     x0, ESR_EL2
         mrs     x1, ELR_EL2
         mrs     x2, FAR_EL2
-        ldr     x3, =hv_panic_info
+        adr     x3, hv_panic_info
         stp     x0, x1, [x3]
         str     x2, [x3, #16]
 1:      wfe

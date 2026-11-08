@@ -188,3 +188,15 @@ Skeletal skinning moved into a kernel in an experimental OpenMoHAA port, same A1
 
 An earlier version with one call per surface gained only 0.4 ms per frame: the gain came from reducing
 the number of calls.
+
+## Hypervisor 5 on the A1200 (06.11.2026)
+
+The armstub with hypervisor 5 (placed from the device tree), Pi powered off and on.
+
+- Total Fast RAM `1920991232` → `1918894080` bytes: exactly 2 MB less, as expected. The hypervisor is at
+  `0x7FE00000`.
+- `hello LOOP=1000 FAULT MP ASYNC`, GCC and VBCC: 1000 calls, 0 errors; copy ok; the fault was caught (ESR
+  `0x96000006`, FAR 4); the asynchronous job ran; `nc_run` 174.9 ms, `nc_run_mp` on 3 cores 66.1 ms (2.65x),
+  no units missing.
+- `bench` (GCC, release build): all checks ok. Adler32 NEON 6.2x, CRC32 instruction 15.7x, matrices NEON 11.6x.
+  Temperature 46–49 °C.

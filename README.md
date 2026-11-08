@@ -23,11 +23,14 @@ Full measurements: [RESULTS.md](RESULTS.md).
 
 ## Status
 
-Version **1.5.0**: `nativecall.library` 1.5, hypervisor 4.
+Version **1.6.0**: `nativecall.library` 1.5, hypervisor 5.
 
-- **Supported hardware: Raspberry Pi 4 with 8 GB only.** The hypervisor lives at a physical address above 4 GB;
-  on a Pi with less RAM the current armstub gives a black screen. See [INSTALL.md](INSTALL.md).
-- Tested on one machine: A1200, PiStorm32-lite, Pi 4 8 GB, Emu68 `1.1.0-beta.1 git:0ba3a89`, AmigaOS 3.2.
+- **Hardware: Raspberry Pi 4.** Hypervisor 5 finds its place in the device tree (the top 2 MB of RAM, taken
+  from Emu68's view), so it no longer depends on the 8 GB model. If the layout is not the expected one, the
+  armstub starts Emu68 like the stock one, without native calls; it does not leave a black screen.
+  See [INSTALL.md](INSTALL.md).
+- Tested on one machine: A1200, PiStorm32-lite, Pi 4 8 GB, Emu68 `1.1.0-beta.1 git:0ba3a89`, AmigaOS 3.2. The 1,
+  2 and 4 GB layouts are tested in QEMU only (NOTES.md 25).
 
 ## How it works
 
@@ -50,7 +53,8 @@ Version **1.5.0**: `nativecall.library` 1.5, hypervisor 4.
 ```
 
 1. **The armstub.** `armstub=nativecall-armstub.bin` in `config.txt` makes the Pi firmware start our code
-   instead of its default stub. It copies a small hypervisor above 4 GB, where Emu68 never looks, and enters
+   instead of its default stub. It takes the top 2 MB of RAM out of the device tree, so Emu68 never sees them,
+   copies a small hypervisor there, and enters
    Emu68 at EL1 with `HCR_EL2.TPC` set, which traps `DC CIVAC` to EL2.
 2. **A request.** The 68k fills a 64-byte call block in Fast RAM, loads a "doorbell" value into D0/D1 and runs
    `CPUSHL DC,(A0)` in supervisor mode. Emu68's JIT turns that into `dc civac`, which traps to the hypervisor.
@@ -124,8 +128,24 @@ On Windows, clone with `core.autocrlf=false`; CRLF line endings break the Linux 
 
 ### QEMU: the hypervisor without hardware
 
-`qemu/run.sh hv` boots **unmodified Emu68** under the hypervisor on QEMU's `raspi3b` and runs a bare 68k test
-program. Setup: [qemu/README.md](qemu/README.md). Every hypervisor change goes through this before hardware.
+`qemu/run.sh hv` boots **unmodified Emu68** under the hypervisor on QEMU's `raspi3b` or `raspi4b` and runs a bare
+68k test program. `python3 qemu/test_all.py` runs every scenario below and checks the results. Setup:
+[qemu/README.md](qemu/README.md). Every hypervisor change goes through this before hardware.
+
+| Scenario | Machine | Expected |
+|---|---|---|
+| `base` | raspi3b, raspi4b | Emu68 alone: every request comes back with status 0 |
+| `hv` | raspi3b, raspi4b | hypervisor placed from the device tree; all tests below pass, top of RAM 2 MB lower |
+| `refuse` | raspi3b, raspi4b | a placement the parser must refuse: status 0, top of RAM unchanged |
+| `stub` | raspi4b | the **real armstub**, all cores starting at 0 in EL3 as with the firmware; all tests pass |
+| `stubrefuse` | raspi4b | the real armstub, initrd at the top of RAM: refused, Emu68 boots without it |
+| `fdt` | PC | the device tree parser alone: 16 layouts (1, 2, 4, 8 GB, `total_mem`, bad trees) |
+
+`raspi4b` is QEMU 9.2 with three small patches (`tools/qemu/qemu9-patch.py`): `wfe` traps, RAM as one node with
+two blocks and 32-bit initrd values, as the Pi firmware writes them. Stock Emu68 then reports the same RAM limits
+as on the A1200.
+
+Tests of the 68k program:
 
 | Test | Checks | Expected |
 |---|---|---|
@@ -147,7 +167,7 @@ program. Setup: [qemu/README.md](qemu/README.md). Every hypervisor change goes t
 `qemu/run.sh base` runs the same program without the hypervisor: every request must come back with status 0.
 
 QEMU's vCPUs take turns here rather than running in parallel, so this verifies the protocol, not the speed. It
-does not cover the Pi 4 firmware, the GIC, or RAM above 4 GB.
+does not cover the real Pi 4 firmware, the GIC, or caches.
 
 ### Real hardware: the example programs
 
@@ -174,11 +194,11 @@ Also tested during development:
   results.
 
 **Exactly what ran on this release's binaries.** `./build.sh` reproduces the armstub and library byte for byte.
-With them on the A1200 (hypervisor 4), `hello` (GCC and VBCC) and `mandeldemo` ran from this build, and QEMU's `hv`
-and `base` runs passed on the source of this commit. `cputest` from this build last ran with hypervisor 3. `bench` and
-`ncdemo` were last run on hardware before modules gained `--gc-sections`, so these builds have not run on hardware.
+With them on the A1200 (hypervisor 5), `hello LOOP=1000 FAULT MP ASYNC` (GCC and VBCC) and `bench` (GCC) passed,
+and all QEMU scenarios above passed on the source of this commit. `mandeldemo` from this build last ran with
+hypervisor 4, `cputest` with hypervisor 3. `ncdemo` was last run on hardware before modules gained `--gc-sections`.
 
-**Not tested:** `async_log` / `ppc_enable` with several cores, any Pi other than the 8 GB Pi 4, and a machine other
+**Not tested:** `async_log` / `ppc_enable` with several cores, a real Pi 4 with 1, 2 or 4 GB, and a machine other
 than the one above.
 
 ## Limitations

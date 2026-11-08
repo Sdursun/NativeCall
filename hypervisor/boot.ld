@@ -5,6 +5,6 @@ ENTRY(_start)
 SECTIONS
 {
     . = 0;
-    .text : { *(.text) }
+    .text : { *(.text) *(.rodata .rodata.*) }
     /DISCARD/ : { *(.comment) *(.note*) *(.data) *(.bss) }
 }

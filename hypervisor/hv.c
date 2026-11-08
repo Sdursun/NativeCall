@@ -57,9 +57,9 @@ static uint64_t last_fault[3];      /* last fault reported to the 68k, for NC_OP
      0x0_0000_0000 - 0x0_00FF_FFFF  invalid: 68k chip RAM / CIA / custom chips live on the Amiga
                                     bus, not in Pi RAM. Native code touching them faults (and is
                                     caught) instead of corrupting low Pi memory.
-     0x0_0100_0000 - 0x0_FBFF_FFFF  Normal WB (Pi RAM, includes all 68k Fast RAM)
+     0x0_0100_0000 - 0x0_FBFF_FFFF  Normal WB (Pi RAM, includes all 68k Fast RAM), only GBs holding RAM
      0x0_FC00_0000 - 0x0_FFFF_FFFF  Device (BCM2711 peripherals, low-peripheral mode)
-     0x1_0000_0000 - 0x1_FFFF_FFFF  Normal WB (RAM above 4 GB: this hypervisor, Emu68 kernel/JIT)
+     0x1_0000_0000 - 0x1_FFFF_FFFF  Normal WB (RAM above 4 GB), only GBs holding RAM
 
    Cache maintenance alias at MAINT_ALIAS + PA, 0 - 8 GB without the hole (Normal, XN; Device
    for the peripherals). Emu68's own DC operations must reach every address, including the low
@@ -101,9 +101,23 @@ static uint64_t l2_gb0[512] __attribute__((aligned(4096)));
 static uint64_t l2_gb3[512] __attribute__((aligned(4096)));
 
 /* Ranges that are Normal memory in the identity map, visible to native code */
+static uint32_t ram_gb_mask;     /* bit n: GB n holds RAM the device tree reports */
+
+static inline int gb_has_ram(uint64_t pa)
+{
+    uint64_t gb = pa >> 30;
+    return gb < 8 && ((ram_gb_mask >> gb) & 1);
+}
+
 static inline int pa_is_ram(uint64_t pa)
 {
-    return (pa >= 0x01000000UL && pa < 0xFC000000UL) || (pa >= 0x100000000UL && pa < PA_LIMIT);
+    return pa >= 0x01000000UL && !(pa >= 0xFC000000UL && pa < 0x100000000UL) && gb_has_ram(pa);
+}
+
+/* Reachable through the maintenance alias: RAM, or the peripherals in GB 3 */
+static inline int pa_in_alias(uint64_t pa)
+{
+    return gb_has_ram(pa) || (pa >= 0xFC000000UL && pa < 0x100000000UL);
 }
 
 #ifdef DEBUG_LED
@@ -145,9 +159,11 @@ void hv_led_off(void)
 void hv_led_off(void) {}
 #endif
 
-void hv_init(void)
+void hv_init(uint32_t gb_mask)
 {
     led_flash(2);
+
+    ram_gb_mask = gb_mask | 1;
 
     for (int i = 0; i < 512; i++)
     {
@@ -155,15 +171,15 @@ void hv_init(void)
         uint64_t a3 = 3 * GB + (uint64_t)i * MB2;
 
         l2_gb0[i] = (a0 < 0x01000000UL) ? 0 : (a0 | BLOCK_NORMAL);
-        l2_gb3[i] = a3 | ((a3 < 0xFC000000UL) ? BLOCK_NORMAL : BLOCK_DEVICE);
+        l2_gb3[i] = (a3 >= 0xFC000000UL) ? (a3 | BLOCK_DEVICE) : gb_has_ram(a3) ? (a3 | BLOCK_NORMAL) : 0;
     }
 
     l1[0] = (uint64_t)(uintptr_t)l2_gb0 | PTE_VALID | PTE_TABLE;
-    l1[1] = 1 * GB | BLOCK_NORMAL;
-    l1[2] = 2 * GB | BLOCK_NORMAL;
+    l1[1] = gb_has_ram(1 * GB) ? (1 * GB | BLOCK_NORMAL) : 0;
+    l1[2] = gb_has_ram(2 * GB) ? (2 * GB | BLOCK_NORMAL) : 0;
     l1[3] = (uint64_t)(uintptr_t)l2_gb3 | PTE_VALID | PTE_TABLE;
     for (int i = 4; i < 8; i++)
-        l1[i] = (uint64_t)i * GB | BLOCK_NORMAL;
+        l1[i] = gb_has_ram((uint64_t)i * GB) ? ((uint64_t)i * GB | BLOCK_NORMAL) : 0;
 
     /* Maintenance alias: L1 entries 8-15 = PA 0-8 GB. GB 3 needs 2 MB blocks for the Device
        part, the existing l2_gb3 maps VA = PA there, so the alias gets its own table. */
@@ -175,7 +191,7 @@ void hv_init(void)
         if (i == 3)
             l1[8 + i] = (uint64_t)(uintptr_t)l2_alias_gb3 | PTE_VALID | PTE_TABLE;
         else
-            l1[8 + i] = (uint64_t)i * GB | BLOCK_NORMAL | PTE_XN;
+            l1[8 + i] = gb_has_ram((uint64_t)i * GB) ? ((uint64_t)i * GB | BLOCK_NORMAL | PTE_XN) : 0;
     }
 
     uint64_t sctlr;
@@ -816,7 +832,7 @@ void hv_sync(uint64_t *regs)
     stat_traps++;
 
     uint64_t pa = el1_to_pa(va);
-    if (pa != PA_INVALID && pa < PA_LIMIT)
+    if (pa != PA_INVALID && pa < PA_LIMIT && pa_in_alias(pa))
     {
         uint64_t alias = MAINT_ALIAS + pa;
 

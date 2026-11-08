@@ -31,10 +31,13 @@
  * POSSIBILITY OF SUCH DAMAGE.
  *
  * Changes for nativecall:
- * - Secondary cores spin at EL2 as before, then go through hv_secondary (HV_BASE + 4): core 2
- *   enters the kernel unchanged, cores 1 and 3 become RUNMP helpers (hv_config.h).
- * - The primary core copies the resident hypervisor (hv.bin, big-endian data) to HV_BASE
- *   and jumps there at EL2. The hypervisor enters the kernel at EL1 (see hv_entry.S).
+ * - Secondary cores spin at EL2 as before, then go through hv_secondary (hypervisor + 4): core 2
+ *   enters the kernel unchanged, cores 1 and 3 become RUNMP helpers (hv_config.h). Without a
+ *   hypervisor they enter the kernel directly.
+ * - The primary core takes HV_RESERVE bytes off the top of the last RAM block in the device tree
+ *   (hv_fdt.c), copies the resident hypervisor (hv.bin, big-endian data) there and jumps to it at
+ *   EL2. The hypervisor enters the kernel at EL1 (see hv_entry.S). If the device tree is refused
+ *   the kernel starts as with the stock armstub: no native calls, but it boots.
  * - The EL3 setup moved behind the firmware-defined words at 0xd8..0xff.
  *
  * This file is little-endian, like every armstub: the firmware writes dtb_ptr32 and
@@ -106,12 +109,23 @@ secondary_spin:
 	wfe
 	ldr	x0, [x5, x6, lsl #3]
 	cbz	x0, secondary_spin
-	movz	x6, #(HV_BASE >> 32), lsl #32
+	ldr	x6, hv_base
+	cbz	x6, secondary_stock
 	add	x6, x6, #4
-	br	x6			/* hv_secondary (HV_BASE + 4), x0 = entry */
+	br	x6			/* hv_secondary (hypervisor + 4), x0 = entry */
+secondary_stock:
+	mov	x4, x0
+	mov	x0, #0
+	mov	x1, #0
+	mov	x2, #0
+	mov	x3, #0
+	br	x4
 
 .ltorg
 
+.org 0xd0
+hv_base:			/* where core 0 put the hypervisor, 0: nowhere. Stays: the page is reserved */
+	.quad 0
 .org 0xd8
 .globl spin_cpu0
 spin_cpu0:
@@ -234,13 +248,30 @@ primary_cpu:
 	bl	led_delay
 #endif
 
+	/* Free memory: the armstub ends well below, the firmware loads the kernel at 0x80000 */
+	mov	x9, #0x70000
+	mov	sp, x9
+	sub	sp, sp, #32		/* struct hv_fdt_result */
+
+	mov	x0, x19
+	ldr	x1, =HV_RESERVE
+	mov	x2, sp
+	bl	hv_fdt_reserve_top	/* MMU off: reads and writes reach the RAM itself */
+	cbnz	x0, no_hypervisor
+
+	ldr	x22, [sp]		/* base */
+	ldr	w21, [sp, #8]		/* gb_mask */
+
 	adr	x5, hv_blob_start
 	adr	x7, hv_blob_end
-	movz	x6, #(HV_BASE >> 32), lsl #32
+	mov	x6, x22
 1:	ldp	x8, x9, [x5], #16
 	stp	x8, x9, [x6], #16
 	cmp	x5, x7
 	b.lo	1b
+
+	adr	x9, hv_base
+	str	x22, [x9]
 
 	dsb	sy
 	ic	iallu
@@ -249,8 +280,34 @@ primary_cpu:
 
 	mov	x0, x19			/* DTB */
 	mov	x1, x20			/* kernel entry */
-	movz	x6, #(HV_BASE >> 32), lsl #32
-	br	x6			/* hv_entry, offset 0 of hv.bin */
+	mov	x3, x21			/* GBs holding RAM */
+	br	x22			/* hv_entry, offset 0 of hv.bin */
+
+	/* The device tree was refused: like the stock armstub, the kernel at EL2 */
+no_hypervisor:
+#ifdef DEBUG_LED
+	mov	x22, x0
+	ldr	x10, =GPIO_BASE
+	mov	w11, #LED_GPIO_BIT
+	str	w11, [x10, #GPSET1]
+	ldr	x13, =CNT_FREQ
+	bl	led_delay
+	str	w11, [x10, #GPCLR1]
+	ldr	x13, =(CNT_FREQ / 2)
+	bl	led_delay
+	ldr	x13, =(CNT_FREQ / 5)
+2:	str	w11, [x10, #GPSET1]
+	bl	led_delay
+	str	w11, [x10, #GPCLR1]
+	bl	led_delay
+	subs	x22, x22, #1
+	b.ne	2b
+#endif
+	mov	x0, x19
+	mov	x1, #0
+	mov	x2, #0
+	mov	x3, #0
+	br	x20
 
 #ifdef DEBUG_LED
 	/* busy wait x13 counter ticks; uses x12, x14 */

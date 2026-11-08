@@ -9,17 +9,28 @@ Emu68's log).
 git clone --recurse-submodules https://github.com/michalsc/Emu68       # <Emu68> below; on Windows with core.autocrlf=false
 docker build -t emu68-build:ubuntu24 <Emu68>/docker/ubuntu
 docker build -t nativecall-qemu:2 -f ../tools/qemu/Dockerfile.wfe ../tools/qemu
+docker build -t nativecall-qemu:3 -f ../tools/qemu/Dockerfile.qemu9 ../tools/qemu
 docker run --rm -v "<Emu68>:/src:ro" -v emu68-rpi-build:/build -w /build emu68-build:ubuntu24 bash -c \
   'cmake /src -GNinja -DTARGET=raspi64 -DVARIANT=none -DCMAKE_TOOLCHAIN_FILE=/src/toolchains/aarch64-linux-gnu.cmake && ninja && gunzip -kf Emu68.img.gz'
-./run.sh hv        # with the hypervisor (loader.S stands in for firmware + armstub)
-./run.sh base      # without it: every request must come back with status 0
 ```
 
-`loader.S` is entered by QEMU at EL2 like the Pi firmware enters `boot.S`; it copies the same
-`hv.bin` (built with `HV_BASE=0x20000000`, the board has 1 GB) and jumps to `hv_entry`.
-`loader.S` also parks the secondary cores in `hv_secondary_spin` (`HV_BASE + 8`), the stand-in
-for boot.S's spin loop, so cores 1 and 3 become helper cores as on the Pi (NOTES.md 22).
-`QEMU_D=int ./run.sh hv` logs exceptions (very slow: the boot does ~500k traps).
+Run everything, with the results checked: `python3 test_all.py`.
+
+| Command | What runs | Expected |
+|---|---|---|
+| `./run.sh hv` | `loader.S` + hypervisor, placed from the device tree | all tests, Emu68's top of RAM 2 MB lower |
+| `./run.sh refuse` | the loader asks for what the parser must refuse | status 0, top of RAM unchanged |
+| `./run.sh base` | Emu68 alone | status 0 |
+| `./run.sh stub` | the **real armstub**, on raspi4b, all cores from 0 at EL3 as the firmware starts them | all tests |
+| `./run.sh stubrefuse` | the real armstub, initrd at the top of RAM: it must refuse | status 0 |
+| `./run.sh fdt` | the device tree parser on the PC, all RAM layouts | 16 of 16 |
+
+`MACHINE=raspi3b` (default, `nativecall-qemu:2`): one RAM block, the 1 GB layout. `MACHINE=raspi4b`
+(`nativecall-qemu:3`): a Pi 4 with two RAM blocks, the layout of an 8 GB Pi with `total_mem=2048`. Both are needed:
+a bug in the RAM mask only showed on raspi4b (NOTES.md 25).
+
+`loader.S` stands in for the firmware + `boot.S`, and also sends the secondary cores through
+`hv_secondary_spin` (hypervisor + 8), so cores 1 and 3 become helper cores as on the Pi (NOTES.md 22).
 
 **QEMU image `nativecall-qemu:2`:** QEMU 8.2.2 built from source with `tools/qemu/wfe-trap.py`.
 Stock QEMU never takes the HCR_EL2.TWE trap on WFE, so the helper cores would never see a job.
@@ -49,4 +60,8 @@ NCTEST END
 Stock QEMU (`tools/qemu/Dockerfile`, `QEMU_IMAGE=nativecall-qemu:1 ./run.sh hv`) cannot test the helper cores:
 they never take work there.
 
-Not covered: Pi 4 firmware, GIC, RAM above 4 GB, real parallel speed.
+**`nativecall-qemu:3`:** QEMU 9.2.4 for `raspi4b`, patched by `tools/qemu/qemu9-patch.py`: WFE traps; RAM as the
+firmware reports it (one node with two blocks; Emu68 reads only the first node); initrd properties in 32 bits as
+Emu68 reads them. With these, stock Emu68 reports the same RAM limits as on a real A1200.
+
+Not covered: the real Pi 4 firmware, caches, RAM above 4 GB, 1/4/8 GB with Emu68, real parallel speed.

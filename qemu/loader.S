@@ -1,16 +1,18 @@
 /*
-    QEMU stand-in for the Pi firmware + armstub (qemu/README.md).
+    QEMU stand-in for the Pi firmware + boot.S (qemu/README.md). ./run.sh stub runs the real armstub
+    instead; this one also works on raspi3b, which has no peripherals where boot.S expects them.
+    QEMU loads this as a Linux arm64 Image at 0x80000, DTB in x0, secondaries in its own spin stub.
 
-    QEMU's raspi3b loads this as a Linux arm64 Image at 0x80000, passes the DTB in x0 and keeps
-    the secondary cores in its own spin-table stub (0xd8..0xf0), like the Pi firmware. Emu68
-    is loaded by "-device loader" at EMU68_LOAD. We do what boot.S does for core 0 on the Pi:
-    copy the hypervisor to HV_BASE and enter hv_entry at EL2 with x0 = DTB, x1 = Emu68 entry.
-    Little-endian, like boot.S.
+    hv_fdt_reserve_top() takes RESERVE bytes off the top of the last /memory block. If it agrees, the
+    hypervisor is copied there and entered; if it refuses, Emu68 starts with no hypervisor, as with the
+    stock armstub. The status is kept at fdt_status for the debugger.
 */
+
+#include "hv_config.h"
 
 #define EMU68_LOAD      0x00280000
 
-        .section .text
+        .section .text.boot, "ax"
         .globl  _start
 _start:
         b       entry                   /* code0 */
@@ -30,7 +32,6 @@ entry:
         b.eq    at_el2
         b.lt    stuck                   /* EL1: no way to install an EL2 handler */
 
-        /* EL3 -> EL2, as boot.S */
         mov     x9, #((1 << 10) | (1 << 8) | (1 << 7) | (1 << 5) | (1 << 4) | 1)
         msr     SCR_EL3, x9
         msr     CPTR_EL3, xzr
@@ -48,9 +49,27 @@ at_el2:
         mrs     x9, MPIDR_EL1
         msr     VMPIDR_EL2, x9
 
+        /* Below the image, unused at this point (boot.S would use the same kind of scratch) */
+        mov     x9, #0x70000
+        mov     sp, x9
+        sub     sp, sp, #32
+
+        mov     x0, x19
+        ldr     x1, =RESERVE
+        mov     x2, sp
+        bl      hv_fdt_reserve_top
+        adr     x9, fdt_status
+        str     x0, [x9]
+        cbnz    x0, no_hypervisor
+
+        ldr     x20, [sp]               /* result.base */
+        ldr     w21, [sp, #8]           /* result.gb_mask */
+        adr     x9, hv_base
+        str     x20, [x9]
+
         adr     x5, hv_blob_start
         adr     x7, hv_blob_end
-        ldr     x6, =HV_BASE
+        mov     x6, x20
 1:      ldp     x8, x9, [x5], #16
         stp     x8, x9, [x6], #16
         cmp     x5, x7
@@ -61,9 +80,7 @@ at_el2:
         dsb     sy
         isb
 
-        /* Secondary cores: on the Pi they spin in boot.S and then go through hv_secondary.
-           Here QEMU's stub holds them; send them to our own loop (secondary below), which
-           continues in hv_secondary_spin (HV_BASE + 8) on the same spin-table words. */
+        /* Send the secondaries through our loop, which continues in hv_secondary_spin */
         adr     x9, secondary
         mov     x10, #0xe0
         str     x9, [x10]
@@ -74,8 +91,17 @@ at_el2:
 
         mov     x0, x19
         ldr     x1, =EMU68_LOAD
-        ldr     x6, =HV_BASE
-        br      x6
+        mov     x3, x21
+        br      x20
+
+        /* Refused: start Emu68 at EL2 as the stock armstub does; QEMU's stub keeps the secondaries */
+no_hypervisor:
+        mov     x0, x19
+        mov     x1, xzr
+        mov     x2, xzr
+        mov     x3, xzr
+        ldr     x4, =EMU68_LOAD
+        br      x4
 
 secondary:
         mrs     x9, CurrentEL
@@ -97,7 +123,7 @@ sec_el2:
         msr     VPIDR_EL2, x9
         mrs     x9, MPIDR_EL1
         msr     VMPIDR_EL2, x9
-        ldr     x6, =HV_BASE
+        ldr     x6, hv_base
         add     x6, x6, #8
         br      x6
 
@@ -105,6 +131,9 @@ stuck:  wfe
         b       stuck
 
         .ltorg
+        .balign 8
+hv_base:        .quad 0
+fdt_status:     .quad 0
 
         .balign 16
 hv_blob_start:
