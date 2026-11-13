@@ -23,12 +23,17 @@ cd myprog
 
 On the Amiga:
 
-- Copy `nativecall.library` 1.5 to `LIBS:` (`sdk/build/nativecall.library`, built by `sdk/nc sdk`).
+- Copy `nativecall.library` 1.7 to `LIBS:` (`sdk/build/nativecall.library`, built by `sdk/nc sdk`).
 - **The program is one file:** the `.narm` module is embedded in it (`NC_EMBED=1`, the default). The
   `.narm` file next to it is optional (see "Single file").
 - Native calls need the nativecall armstub on the Pi (../INSTALL.md), version 3 for several ARM
-  cores and version 4 for asynchronous jobs. With an older armstub the program still runs natively:
-  on one core, waiting for each job. Without any armstub it runs its 68k version.
+  cores, 4 for asynchronous jobs, 6 for the time limit, 7 for the log, fault details, memory
+  protection and job cancel, 8 for statistics. With an older armstub the program still runs
+  natively, without those. Without any armstub it runs its 68k version.
+
+**Coming from SDK 1.5.0 or 1.6.0:** rebuild your modules. Those SDKs left a module's `.bss` out of
+the image, so a kernel with zero-initialised static or global variables wrote past its module
+(../NOTES.md 26.7).
 
 ## How to write a program
 
@@ -123,6 +128,8 @@ nc_close(k);
 | `nc_run_mp(k, i, p, sizeof(*p), from, to)` | Like `nc_run`, also on the ARM cores Emu68 leaves idle (3 in total on a PiStorm; library 1.4 + hypervisor 3, otherwise `nc_run`). See "Several cores". |
 | `nc_cores(k)` | ARM cores `nc_run_mp` uses (0: no native calls). |
 | `nc_start_mp(k, &job, i, p, sizeof(*p), from, to)` / `nc_done` / `nc_wait` | **Asynchronous** `nc_run_mp`: the job runs on the helper cores while the 68k goes on (library 1.5 + hypervisor 4). See "Asynchronous jobs". |
+| `nc_cancel(k, &job)` | Stops a job: pieces not started are skipped, running ones end, then like `nc_wait`; `nc_status` is `NC_ST_CANCELLED` (library 1.6 + hypervisor 7; otherwise it waits). |
+| `nc_set_timeout(k, microseconds)` | Time limit for one native call or piece of this kernel set; 0 is the default of 1 s. Past it the call ends with `NC_ST_TIMEOUT` (library 1.6 + hypervisor 6). FALSE when there is no limit. |
 | `nc_call_68k` / `nc_run_68k` | Always the 68k version (for comparisons). |
 | `nc_is_native(k)` | Whether calls run natively. |
 | `nc_status(k)` | Status of the last native call (`NC_ST_OK`, `NC_ST_FAULT`, ...); after `nc_open` also why there are no native calls (`NC_ST_MISMATCH`, `NC_ST_NOMODULE`, ...). See `nativecall/nc_abi.h`. |
@@ -135,7 +142,8 @@ nc_close(k);
 The functions of `nativecall.library` can be used directly too (`<proto/nativecall.h>`): `NC_GetInfo`
 (hypervisor statistics), `NC_LastFault` (ESR/FAR/ELR of the last native fault), `NC_GetKernelStats`,
 `NC_LoadModule`, `NC_LoadModuleMem`, `NC_Run`, `NC_RunMP`, `NC_Cores`, `NC_StartMP`, `NC_JobDone`,
-`NC_WaitJob`. Definitions: `sfd/nativecall_lib.sfd`.
+`NC_WaitJob`, `NC_SetTimeout`, `NC_ReadLog`, `NC_GetFaultInfo`, `NC_CancelJob`, `NC_GetStats`,
+`NC_ListModules`. Definitions: `sfd/nativecall_lib.sfd`.
 
 | Library | New | Needs |
 |---|---|---|
@@ -144,10 +152,16 @@ The functions of `nativecall.library` can be used directly too (`<proto/nativeca
 | 1.3 | `NC_Run` learns the piece size per kernel | – |
 | 1.4 | `NC_RunMP`, `NC_Cores` | several cores: hypervisor 3 |
 | 1.5 | `NC_StartMP`, `NC_JobDone`, `NC_WaitJob` | asynchronous jobs: hypervisor 4 |
+| 1.6 | `NC_SetTimeout`, `NC_ReadLog`, `NC_GetFaultInfo`, `NC_CancelJob`; unloading cancels jobs; 64 KB of slack behind a module | time limit: hypervisor 6; log, fault details, cancel: hypervisor 7 |
+| 1.7 | `NC_GetStats`, `NC_ListModules` | statistics: hypervisor 8 |
 
 `ncsupport.c` checks the library version. With an older library `nc_run_mp` becomes `nc_run`,
-`nc_start_mp` runs the job at once and `nc_stats` returns FALSE. `nc_now_us`, `nc_addr_ok` and
-`nc_addr_limits` do not depend on the library.
+`nc_start_mp` runs the job at once, `nc_stats` and `nc_set_timeout` return FALSE and `nc_cancel`
+waits. `nc_now_us`, `nc_addr_ok` and `nc_addr_limits` do not depend on the library.
+
+A program that exits without `nc_close` is cleaned up: the first `nc_open` registers an `atexit`
+handler that cancels its jobs and unloads its modules. Programs without a C runtime compile
+`ncsupport.c` with `-DNC_NO_ATEXIT` and must call `nc_close` themselves.
 
 ## Kernel rules
 
@@ -179,12 +193,18 @@ with `nc_run_mp` also on the cores Emu68 leaves idle (../NOTES.md 22).
    - No `double` fields: VBCC aligns them to 2 or 4 bytes.
    - Pin the layout with `NC_CHECK_SIZE` / `NC_CHECK_OFFSET`.
    - Read pointer fields with `NC_PTR()`.
-5. **An endless loop locks the machine** (`nc_call`/`nc_run`/`nc_run_mp`): there is no recovery on
-   the native side. In an asynchronous job only that helper core hangs, but `nc_wait` never returns.
+5. **A call has a time limit** (hypervisor 6): 1 s by default, `nc_set_timeout` changes it. A kernel
+   that runs past it is stopped and the call returns `NC_ST_TIMEOUT`; with `nc_run_mp` and
+   `nc_start_mp` the limit applies to each piece. The machine stays locked until then, so give
+   kernels that might loop a short limit while you develop them. After a time-out the kernel's output
+   may be half written and a lock it held (the `nc_heap` one, for example) stays taken: unload the
+   module or report the error. With an older hypervisor, or an armstub built with `GIC=0`, an endless
+   loop locks the machine for good.
    - **Stack:** every ARM core has a 64 KB stack; the hypervisor and the FPU save use about 1 KB.
-     There is no overflow protection: on core 0 an overflow overwrites the hypervisor's own data, on
-     a helper core the stack of another core. Keep a kernel's locals **under 32 KB**; large arrays
-     belong in `nc_alloc` memory or a `nc_heap`.
+     With hypervisor 7 an overflow hits a guard page and ends in `NC_ST_FAULT`. Keep a kernel's
+     locals **under 32 KB**; large arrays belong in `nc_alloc` memory or a `nc_heap`.
+   - **The 68k version runs on the caller's stack**, and a Shell gives a program 4 KB. See
+     "Debugging".
 6. **A module is at most 1 MB.** The SDK builds with `-mcmodel=tiny` and checks position independence
    in every build.
 7. **68k and native results can differ.**
@@ -266,6 +286,7 @@ CC68          ?= vbcc            # vbcc | gcc
 CFLAGS68      :=                 # extra 68k flags
 LIBS68        :=                 # extra 68k libraries
 CFLAGS_NATIVE :=                 # extra flags for the kernels' Pi build
+OPT68         := -O2             # 68k optimisation level (-O1 / -O0 if VBCC chokes on a source)
 NC_EMBED      ?= 1               # 1: the module is embedded in the program
 NC_SDK        ?= ../sdk
 include $(NC_SDK)/mk/nativecall.mk
@@ -276,11 +297,21 @@ Targets: `nc make` (program + module), `nc make narm` (only the module and `<pre
 
 | Compiler | Flags |
 |---|---|
-| VBCC (0.9h P3) | `+aos68k -c99 -O2 -cpu=68040 -fpu=68040`, NDK 3.2, `-lm040 -lamiga` |
-| GCC 16.2 | `-O2 -m68040 -mhard-float -noixemul` (libnix), `-lm` |
+| VBCC (0.9h P3) | `+aos68k -c99 -O2 -cpu=68040 -fpu=68060`, NDK 3.2, `-lm040 -lamiga` |
+| GCC 16.2 | `-O2 -m68040 -mtune=68060 -mhard-float -fno-branch-count-reg -noixemul` (libnix), `-lm` |
 
 With this GCC, `-m68040` alone does not enable the FPU: without `-mhard-float` floating point runs in
 software and is 100 times slower on Emu68. The SDK adds the flag itself.
+
+`-fpu=68060` / `-mtune=68060` and `-fno-branch-count-reg` are there for Emu68: float to integer
+conversions use `FINTRZ` (the 68040 way needs three FPCR accesses, which are expensive in the JIT),
+and loops are not closed with `DBF` (the JIT ends its translation unit there). The 68k path of
+`ncdemo` became twice as fast with them (../NOTES.md 27). The code still runs on a real 68040, where
+68040.library emulates `FINTRZ`. If your project builds its 68k side itself, the same flags are
+worth trying.
+
+Kernels are built for the Pi with `-g -fno-omit-frame-pointer`, so that a fault can be traced back
+to source lines ("Debugging"). The `.narm` does not grow; the information stays in the `.elf`.
 
 ## Single file: embedded module and build ID
 
@@ -427,8 +458,13 @@ r = nc_wait(k, &job);                                          /* the result; nc
 - **Piece size:** the size `nc_run` learned for this kernel, otherwise 1/16 of the range. A piece may
   take longer than 1 ms on a helper, but core 0 also takes pieces during `nc_wait`: keep them around
   0.5 ms.
-- **`nc_close`** waits for unfinished jobs (before the module goes away). If the program crashes
-  before a job ends, a helper may write to memory that has been freed.
+- **Cancelling:** `nc_cancel(k, &job)` skips the pieces that have not started, lets the running ones
+  end, and returns what `nc_wait` would; `nc_status(k)` is `NC_ST_CANCELLED` and the result is the
+  sum of the pieces that ran. Cancelling an 87 ms job took 1.0 to 1.5 ms on the A1200.
+- **`nc_close`** cancels unfinished jobs before the module goes away (library 1.6 + hypervisor 7;
+  older ones wait for them). So does exiting without `nc_close`, and the library cancels the jobs
+  of tasks that are gone when the next job starts. Only the memory is still yours to keep: do not
+  free a job's buffers before `nc_wait`, `nc_cancel` or `nc_close` has returned.
 
 A1200 (`hello ASYNC`, 16384 units): the job finished in 87.9 ms (174.9 ms on one core), the 68k kept
 running all the time, and only cores 1 and 3 did the work.
@@ -440,11 +476,23 @@ the 68k does not need right away.
 
 | Example | What it shows |
 |---|---|
-| `hello` | `add(40,2)`, 1000 calls, a kernel using `memcpy`, a kernel that crashes on purpose (`FAULT`). `MP`: how much each ARM core did. `ASYNC`: `nc_start_mp`. `HEAP`: `nc_heap` on both sides. `TIME`: call costs. |
+| `hello` | `add(40,2)`, 1000 calls, a kernel using `memcpy`, a kernel that crashes on purpose (`FAULT`). `MP`: how much each ARM core did. `ASYNC`: `nc_start_mp`. `HEAP`: `nc_heap` on both sides. `TIME`: call costs. `TIMEOUT`: an endless kernel is stopped. `LOG`: `nc_printf` and a backtrace. `PROTECT`: what native code may not touch. `CANCEL`, `LEAK`: stopping a job, exiting without cleaning up. |
 | `cputest` | Primes and Mandelbrot: 68k / native / NEON, in the Shell with bar charts |
 | `bench` | Adler32, CRC32 (NEON, CRC32 instruction), 4x4 matrix; the table in ../RESULTS.md |
-| `ncdemo` | A game-like load: software 3D with a z-buffer (rotating torus, 4096 triangles) on an RTG screen; `N` or a click switches 68k ↔ native, fps on screen |
+| `ncdemo` | A game-like load: software 3D with a z-buffer (rotating torus, 4096 triangles) on an RTG screen; `N` or a click: 68k, native, all cores (`nc_run_mp`); fps on screen |
 | `mandeldemo` | Mandelbrot zoom (Seahorse Valley) on an RTG screen; `1`-`4` or `N`: 68k / native double / **NEON** (float, 4 pixels at once) / **NEON on all cores** (`nc_run_mp`); iterations per second on screen. An example of NEON intrinsics and `nc_run_mp`. |
+
+| `raydemo` | Real-time ray tracing: mirror spheres, a chequered floor, shadows, 3 bounces. Independent work per pixel, so the gain is the largest here (A1200: 68k 1.9 fps, native 11, three cores 34). |
+| `voxeldemo` | Flight over a height map (one ray per column); a kernel also generates the map at start. 198 fps on three cores. |
+| `nbodydemo` | Gravity between 1500 bodies, every pair (2.25 million pairs per frame). A step with two buffers: each piece reads only the old state and writes its own entries. |
+| `filterdemo` | Image processing: bilinear rotation and scaling, then a 3x3 filter (blur, sharpen, edges, emboss; key `F`). Two kernels in a row. |
+| `mp3demo` | MP3 player: decoding (`minimp3`) with `nc_start_mp` on an idle ARM core, the 68k only hands buffers to AHI. `BENCH`: decoding time on the 68k and natively, samples compared. |
+
+`raydemo`, `voxeldemo`, `nbodydemo` and `filterdemo` share a skeleton (`examples/common/`):
+`demofw.c` opens the screen (16-bit RTG, else 32-bit, else 256 colours), switches between 68k, native
+and all cores with `1`-`3` / `N`, measures, and prints a summary at the end; `demopix.h` lets kernels
+write in the screen's pixel format. Common arguments: `WIDTH HEIGHT SECONDS AUTO MODE`. A new graphics
+demo only needs a `struct DemoApp` (init, frame, cleanup).
 
 ```sh
 cd sdk/examples/cputest && ../../nc make && ../../nc make CC68=gcc
@@ -464,12 +512,49 @@ cd sdk/examples/cputest && ../../nc make && ../../nc make CC68=gcc
 - **GPU-limited programs gain little.** If the frame time goes to the GPU, a faster CPU part does not
   change the frame rate (`RESULTS.md`, Boing Ocean).
 
+## Status: `NCStatus` and `NCLog STATS` (library 1.7, hypervisor 8)
+
+- **`NCStatus`** (`dist/Tools/`, MUI 3.8+): whether NativeCall is active (hypervisor and library
+  version, whether the time limit works), the share of its time each ARM core spends in native code,
+  the SoC temperature, the programs that have native modules loaded (calls per second, ARM time,
+  jobs, faults) and the hypervisor's log. It says so if the library or the hypervisor is missing. It
+  has an icon; start it from Workbench or the Shell.
+- **`NCLog STATS`:** the same in the Shell, from a one-second sample.
+- **From a program:** `NC_GetStats(&stats)` (`struct NCStats`: native time and calls per core,
+  temperature, jobs, faults) and `NC_ListModules(info, max)` (`struct NCModuleInfo`: the name of the
+  program that loaded the module, calls, ARM time). Both are in `nc_abi.h`. Load is the difference
+  between two readings: change of `busy` / change of the counter.
+- Core 0 belongs to the 68k (Emu68's JIT); the share shown is the part spent in native code. The
+  helper cores (1 and 3 on a PiStorm) are busy only while they run pieces of `nc_run_mp` /
+  `nc_start_mp`.
+
 ## Debugging
 
-- **`nc_status(k)`:** `NC_ST_FAULT` means the kernel crashed. `NC_LastFault()` gives FAR (the bad
-  address) and ELR (the ARM instruction address); look for ELR in the `objdump -d` output of
-  `build/native/<module>.elf` (module address + offset).
+- **`nc_status(k)`:** `NC_ST_FAULT` means the kernel crashed, `NC_ST_TIMEOUT` that it ran past its
+  time limit.
+- **Log** (hypervisor 7, library 1.6): in a kernel, `nc_printf("x=%d\n", x)` / `nc_log("...")` write
+  to a 16 KB ring in the hypervisor (from any core, at most 255 bytes per call; in the 68k version
+  they do nothing). `nc_printf` knows `%d %i %u %x %X %p %s %c`, the flags `-` and `0`, a width, and
+  `l` / `ll` / `z`. On the Amiga `NCLog` (or `NCLog FOLLOW`) prints the log; a program reads it with
+  `NC_ReadLog()`. The hypervisor adds a line of its own for every fault and time-out.
+- **Fault details:** `NCLog FAULT` (or `NC_GetFaultInfo()`) gives the registers of the last fault and
+  a backtrace as module offsets. Turn them into source lines on the PC:
+  `nc addr2line build/native/<module>.elf 0x30 0x4c 0x6c 0xeb0` → `df3 at ..._kernels.c:167`, ...
+- **`NC_LastFault()`:** the older way: FAR and the low 32 bits of ELR.
 - **`NC_GetInfo()`:** trap, call and fault counters.
+- **Stack of the 68k version:** the 68k version of a kernel runs on the caller's stack, and a Shell
+  gives 4 KB. A kernel with a large local array (an MP3 decoder: 16 KB), or libnix `printf` plus
+  graphics calls, goes past that and silently corrupts memory. On the native side the stack is
+  64 KB. Keep local arrays small, or run the work in a process with a big stack
+  (`examples/common/bigstack.c`: `run_with_stack(fn, 65536, name)`). Do not rely on the compilers'
+  `__stack` variable.
+- **MUI programs with GCC 16:** the inline `MUI_NewObject` of the MUI SDK header builds a broken tag
+  list. Define `NO_INLINE_STDARG` and use a version that copies the tags (`tools/ncstatus.c`).
+  libnix `printf` reads `%u` as 16 bit: use `%lu` and a cast.
+- **VBCC and a big third-party source:** if the optimiser fails or miscompiles (minimp3 at `-O1` and
+  `-O2`), set `OPT68 := -O0` for VBCC in that project's Makefile, and compare 68k and native results.
+- **`PiReboot NOW`** (`dist/C/`): restarts the Pi through its watchdog, for example after replacing
+  the armstub; no power cycle is needed. It is a hard reset.
 - **`nc_cores(k)` is 1?** The armstub is not hypervisor 3 or newer.
 - **`nc_run_mp` slower than expected?** With `ppc_enable` core 3 does not help while a PowerPC program
   runs (`hello MP` shows how much each core did). Also check the temperature, below.
@@ -490,7 +575,7 @@ cd sdk/examples/cputest && ../../nc make && ../../nc make CC68=gcc
 
 ```
 sdk/
-  nc                  command: new, make, sdk, image, shell
+  nc                  command: new, make, sdk, image, shell, addr2line
   docker/Dockerfile   nativecall-sdk:1 (GCC 16.2, VBCC 0.9h P3, NDK 3.2, aarch64 GCC 14)
   include/
     nativecall/       kernel.h, nativecall.h, nc_abi.h, nc_math.h, nc_heap.h
@@ -501,6 +586,10 @@ sdk/
   native/             narm.ld, narm_rt.c, include/ (string.h, stdlib.h for kernels)
   mk/nativecall.mk    project rules
   tools/narm2c.py     turns a module into C data (embedding, build ID)
+  tools/nclog.c       NCLog: log, last fault, statistics
+  tools/ncstatus.c    NCStatus (MUI); tools/mkicon.py draws its icon
+  tools/pireboot.c    PiReboot: restart the Pi from the Amiga
   template/           the nc new template
-  examples/           hello, cputest, bench, ncdemo, mandeldemo
+  examples/           hello, cputest, bench, ncdemo, mandeldemo, raydemo, voxeldemo, nbodydemo,
+                      filterdemo, mp3demo; common/ (the skeleton of the graphics demos)
 ```

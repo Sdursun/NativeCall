@@ -14,7 +14,29 @@ VC      := vc +aos68k
 VASM    := vasmm68k_mot -quiet -Fhunk -m68040
 CFLAGS  := -c99 -O2 -cpu=68020 -I$(NDK_INCLUDE) -Iinclude -Iinclude/nativecall
 
-all: headers $(LIB)
+all: headers $(LIB) $(B)/NCLog $(B)/PiReboot $(B)/NCStatus $(B)/NCStatus.info
+
+# PiReboot: restart the Pi from the Amiga (watchdog), e.g. after an armstub change
+$(B)/PiReboot: tools/pireboot.c | $(B)
+	$(VC) -c99 -O2 -cpu=68020 -I$(NDK_INCLUDE) -o $@ $< -lamiga
+	@echo "== $@: $$(stat -c %s $@) bytes"
+
+# NCLog: the hypervisor's log and the last native fault (library 1.6, hypervisor 7)
+$(B)/NCLog: tools/nclog.c include/nativecall/nc_abi.h $(HEADERS) | $(B)
+	$(VC) -c99 -O2 -cpu=68020 -I$(NDK_INCLUDE) -Iinclude -o $@ $< -lamiga
+	@echo "== $@: $$(stat -c %s $@) bytes"
+
+# NCStatus: MUI window with the state of nativecall (library 1.7, hypervisor 8). GCC: MUI's
+# headers come from the MUI SDK in the image.
+MUI_INC ?= /opt/mui-sdk/SDK/MUI/C/include
+$(B)/NCStatus: tools/ncstatus.c include/nativecall/nc_abi.h $(HEADERS) | $(B)
+	m68k-amigaos-gcc -O2 -m68020 -noixemul -Wall -Wno-pointer-sign -Iinclude -I$(MUI_INC) -o $@ $< -lamiga
+	m68k-amigaos-strip $@
+	@echo "== $@: $$(stat -c %s $@) bytes"
+
+# Its icon: 46 x 46, 32 colours (GlowIcons), drawn by a script
+$(B)/NCStatus.info: tools/mkicon.py | $(B)
+	python3 tools/mkicon.py $@
 
 headers: $(HEADERS)
 

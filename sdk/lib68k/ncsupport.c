@@ -14,6 +14,9 @@
 #include <proto/timer.h>
 #include <proto/nativecall.h>
 #include <string.h>
+#ifndef NC_NO_ATEXIT
+#include <stdlib.h>
+#endif
 
 #include <nativecall/nativecall.h>
 
@@ -22,11 +25,26 @@ static ULONG lib_users;
 
 struct NCKernels
 {
+    struct NCKernels *next;         /* open sets of this program (closed at exit) */
     const struct NCKernelSet *set;
     APTR module;                    /* NULL: 68k only */
     ULONG status;
     APTR entry[1];                  /* set->count entries */
 };
+
+/* Kernel sets the program has open. A program that ends without nc_close() would leave its
+   module loaded and its jobs running on the helper cores, writing memory that is free again:
+   the first nc_open() registers nc__at_exit(), which closes what is still open (nc_close cancels
+   the jobs). Not for programs without a C runtime: compile ncsupport.c with -DNC_NO_ATEXIT. */
+static struct NCKernels *open_sets;
+
+#ifndef NC_NO_ATEXIT
+static void nc__at_exit(void)
+{
+    while (open_sets)
+        nc_close(open_sets);
+}
+#endif
 
 static ULONG kernels_size(const struct NCKernelSet *set)
 {
@@ -98,6 +116,19 @@ struct NCKernels *nc_open_path(const struct NCKernelSet *set, CONST_STRPTR path)
         return NULL;
     k->set = set;
     k->status = NC_ST_NONE;
+#ifndef NC_NO_ATEXIT
+    {
+        static BOOL hooked;
+
+        if (!hooked)
+        {
+            atexit(nc__at_exit);
+            hooked = TRUE;
+        }
+    }
+#endif
+    k->next = open_sets;
+    open_sets = k;
 
     if (!NativeCallBase)
         NativeCallBase = OpenLibrary((CONST_STRPTR)"nativecall.library", 1);
@@ -156,8 +187,16 @@ struct NCKernels *nc_open(const struct NCKernelSet *set)
 
 void nc_close(struct NCKernels *k)
 {
+    struct NCKernels **link;
+
     if (!k)
         return;
+    for (link = &open_sets; *link; link = &(*link)->next)
+        if (*link == k)
+        {
+            *link = k->next;
+            break;
+        }
     if (k->module)
         NC_UnloadModule(k->module);
     if (NativeCallBase && --lib_users == 0)
@@ -279,9 +318,28 @@ NC_U32 nc_wait(struct NCKernels *k, struct NCJob *job)
     return job->result;
 }
 
+/* Cancel (library 1.6): with an older library it waits */
+NC_U32 nc_cancel(struct NCKernels *k, struct NCJob *job)
+{
+    if (job->handle && (NativeCallBase->lib_Version > 1 || NativeCallBase->lib_Revision >= 6))
+    {
+        job->result = NC_CancelJob(job->handle, &job->status);
+        job->handle = 0;
+    }
+    return nc_wait(k, job);
+}
+
 ULONG nc_status(struct NCKernels *k)
 {
     return k->status;
+}
+
+/* Time limit (library 1.6, hypervisor 6): older libraries have no NC_SetTimeout */
+BOOL nc_set_timeout(struct NCKernels *k, ULONG microseconds)
+{
+    if (!k->module || !(NativeCallBase->lib_Version > 1 || NativeCallBase->lib_Revision >= 6))
+        return FALSE;
+    return (BOOL)(NC_SetTimeout(k->module, microseconds) != 0xffffffffUL);
 }
 
 BOOL nc_stats(struct NCKernels *k, ULONG index, struct NCKernelStats *stats, BOOL reset)

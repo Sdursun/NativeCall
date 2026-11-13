@@ -1,4 +1,4 @@
-# QEMU 9.2 (has the raspi4b machine: BCM2711, GIC, 2 GB), patched by qemu9-patch.py, for the QEMU test on a Pi 4 model.
+# QEMU 9.2 (has the raspi4b machine: BCM2711, GIC with Security Extensions, 2 GB), patched by qemu9-patch.py, for the QEMU test on a Pi 4 model.
 # docker build -t nativecall-qemu:3 -f Dockerfile.qemu9 .   (from tools/qemu)
 FROM emu68-build:ubuntu24
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential ninja-build \

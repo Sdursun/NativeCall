@@ -62,6 +62,12 @@ they never take work there.
 
 **`nativecall-qemu:3`:** QEMU 9.2.4 for `raspi4b`, patched by `tools/qemu/qemu9-patch.py`: WFE traps; RAM as the
 firmware reports it (one node with two blocks; Emu68 reads only the first node); initrd properties in 32 bits as
-Emu68 reads them. With these, stock Emu68 reports the same RAM limits as on a real A1200.
+Emu68 reads them; and the GIC with Security Extensions, as the GIC-400 of the BCM2711 has. With these, stock Emu68
+reports the same RAM limits as on a real A1200, and the time limit of native code (a Group 0 FIQ, NOTES.md 26.2)
+works in the `stub` scenario. Rebuild the image if yours is older than release 1.7.0.
+
+To test the armstub binary that goes on the SD card rather than a fresh build, copy it to
+`hypervisor/build-qemu-stub/nativecall-armstub.bin`, `touch` it, run `stub`, and compare the md5 afterwards: make
+rebuilds the file if a source is newer.
 
 Not covered: the real Pi 4 firmware, caches, RAM above 4 GB, 1/4/8 GB with Emu68, real parallel speed.

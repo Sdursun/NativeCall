@@ -59,4 +59,22 @@ BOOL __NC_JobDone(__reg("a6") struct Library *, __reg("d0") ULONG job)="\tjsr\t-
 ULONG __NC_WaitJob(__reg("a6") struct Library *, __reg("d0") ULONG job, __reg("a0") ULONG * status)="\tjsr\t-132(a6)";
 #define NC_WaitJob(job, status) __NC_WaitJob(NativeCallBase, (job), (status))
 
+ULONG __NC_SetTimeout(__reg("a6") struct Library *, __reg("a0") APTR module, __reg("d0") ULONG microseconds)="\tjsr\t-138(a6)";
+#define NC_SetTimeout(module, microseconds) __NC_SetTimeout(NativeCallBase, (module), (microseconds))
+
+ULONG __NC_ReadLog(__reg("a6") struct Library *, __reg("a0") APTR buffer, __reg("d0") ULONG size, __reg("a1") ULONG * position)="\tjsr\t-144(a6)";
+#define NC_ReadLog(buffer, size, position) __NC_ReadLog(NativeCallBase, (buffer), (size), (position))
+
+BOOL __NC_GetFaultInfo(__reg("a6") struct Library *, __reg("a0") struct NCFaultInfo * info)="\tjsr\t-150(a6)";
+#define NC_GetFaultInfo(info) __NC_GetFaultInfo(NativeCallBase, (info))
+
+ULONG __NC_CancelJob(__reg("a6") struct Library *, __reg("d0") ULONG job, __reg("a0") ULONG * status)="\tjsr\t-156(a6)";
+#define NC_CancelJob(job, status) __NC_CancelJob(NativeCallBase, (job), (status))
+
+BOOL __NC_GetStats(__reg("a6") struct Library *, __reg("a0") struct NCStats * stats)="\tjsr\t-162(a6)";
+#define NC_GetStats(stats) __NC_GetStats(NativeCallBase, (stats))
+
+ULONG __NC_ListModules(__reg("a6") struct Library *, __reg("a0") struct NCModuleInfo * info, __reg("d0") ULONG max)="\tjsr\t-168(a6)";
+#define NC_ListModules(info, max) __NC_ListModules(NativeCallBase, (info), (max))
+
 #endif /*  _VBCCINLINE_NATIVECALL_H  */

@@ -13,15 +13,103 @@ during the project, so older tables were not repeated with the newest versions.
 |---|---:|---:|---:|
 | CRC32, 4 MB (hardware instruction) | 52.11 ms | 2.38 ms | 21.9x |
 | 4x4 matrix × 10 000 vertices (NEON) | 1.01 ms | 0.11 ms | 9.2x |
+| Ray tracing (`raydemo`, 3 cores) | 1.9 fps | 33.6 fps | 18.4x |
+| Rotate, scale and 3x3 filter (`filterdemo`, 3 cores) | 9.7 fps | 125.3 fps | 15.5x |
+| 1500-body gravity (`nbodydemo`, 3 cores) | 6.0 fps | 61.0 fps | 10.9x |
 | Mandelbrot zoom (NEON, 3 cores) | 3.2 fps | 27.1 fps | 8.8x (iterations/s) |
 | Adler32, 4 MB (NEON) | 19.86 ms | 2.77 ms | 7.2x |
-| Software 3D torus | 44.6 fps | 169.3 fps | 3.8x |
+| MP3 decoding (`mp3demo`, 1 core) | 27.8x real time | 198x real time | 7.1x |
+| Voxel landscape (`voxeldemo`, 3 cores) | 40.7 fps | 198.3 fps | 6.0x |
+| Software 3D torus (`ncdemo`, 3 cores) | 50.4 fps | 204.6 fps | 4.1x |
 | Same C code, one core, no SIMD | | | 1.4x to 2.4x |
 | GPU-limited demo (Boing Ocean) | 55.3 fps | 55.8 fps | +0.9% |
 
 Emu68's JIT already turns 68k code into ARM code, so plain C gains about 2x. The big gains come from
 what the 68k has no equivalent of (NEON, the CRC32 instruction, extra cores). Where the GPU sets the
 frame rate, a faster CPU part gains almost nothing.
+
+The gains of the graphics demos compare the time to compute a frame; the copy to the screen is the
+same on both sides. The gain also depends on how the 68k side was compiled: see "68k compiler flags"
+below.
+
+## Release 1.7 (13.11.2026; hypervisor 8, library 1.7, GCC 16.2.1b, VBCC 0.9h)
+
+640x480 16-bit RTG screen (BGR16PC), Pi without cooling at 70 to 75 °C. 68k flags: GCC `-O2 -m68040
+-mtune=68060 -mhard-float -fno-branch-count-reg`, VBCC `-O2 -cpu=68040 -fpu=68060`.
+
+**Graphics demos** (fps; "MP" is three ARM cores; gains by frame compute time):
+
+| Demo | 68k GCC | 68k VBCC | native | native MP | MP vs 68k GCC | MP vs 68k VBCC |
+|---|---:|---:|---:|---:|---:|---:|
+| `raydemo`: ray tracing, 6 spheres, shadows, 3 bounces | 1.9 | 1.0 | 11.4 | 33.6 | 18.4x | 33.5x |
+| `filterdemo`: bilinear rotate and scale, then a 3x3 filter | 9.7 | 6.0 | 52.4 | 125.3 | 15.5x | 25.2x |
+| `nbodydemo`: 1500 bodies, every pair | 6.0 | 5.9 | 24.4 | 61.0 | 10.9x | 11.1x |
+| `voxeldemo`: flight over a height map | 40.7 | 29.8 | 98.1 | 198.3 | 6.0x | 8.3x |
+| `ncdemo`: software 3D, 4096 triangles | 50.4 | 41.7 | 159.1 | 204.6 | 4.1x | 4.5x |
+| `mandeldemo`: NEON on 3 cores, Miter/s | 71.6 | 57.1 | – | 592.8 | 8.3x | 10.4x |
+
+`ncdemo` per frame (GCC, `SECONDS=9 AUTO=3`):
+
+| Mode | transform | raster | display |
+|---|---:|---:|---:|
+| 68k | 0.39 ms | 16.35 ms | 3.10 ms |
+| native | 0.10 ms | 3.58 ms | 2.60 ms |
+| native MP | 0.07 ms | 2.85 ms | 1.96 ms |
+
+Several cores gain little here: every raster piece walks all triangles again, and the rest of the frame
+is the copy to the screen.
+
+**MP3 decoding** (`mp3demo BENCH`, 44.1 kHz stereo, 21.8 s of sound, minimp3 without SIMD):
+
+| | Time | Times real time |
+|---|---:|---:|
+| 68k, GCC | 785 ms | 27.8x |
+| 68k, VBCC (`-O0`, NOTES.md 29) | 1314 ms | 16.6x |
+| native, one core | 110 ms | 198x |
+
+Native is 7.1 times faster than the GCC 68k build. 68k and native samples differ in 802 of 1 921 536
+samples, by 1 at most. While playing (`mp3demo <file>`), an idle core decodes: two jobs per second, and
+its load stays near 0%.
+
+**Load** (`NCLog STATS` during `mandeldemo` NEON MP): cores 0, 1 and 3 spend 78 to 79% of their time in
+native code, about 14 700 pieces per second each. The hypervisor reads 69 to 75 °C; `ENV:Emu68/Temperature`
+read 70.1 °C when the hypervisor read 69.1 °C.
+
+**Time limit, cancel, protection** (`hello`, hypervisor 6 and 7, 12.11.2026):
+
+| Test | Result |
+|---|---|
+| endless kernel, `nc_call`, 20 ms limit | `0x87` after 21.2 to 21.5 ms; the next call gives 42 |
+| the same with `nc_run_mp` | `0x87` after 20.5 to 21.0 ms |
+| the same with `nc_start_mp` + `nc_wait` | `0x87` after 20.2 to 20.4 ms |
+| `nc_call(add)` with the limit armed | 5.90 µs (5.4 to 6.5 µs before): no measurable cost |
+| 87 ms job cancelled after 10 ms | `0x88`, 2048 of 16384 units ran, the cancel took 1.0 to 1.5 ms |
+| `nc_close` with a running job | returned after 11 ms |
+| write to hypervisor code | `0x84`, ESR `9600004f` |
+| read of Emu68's private memory | `0x84`, ESR `96000006`, FAR `0x7fd00000` |
+| stack overflow | `0x84`, ESR `96000047`, FAR in the guard page |
+
+Native code sees 1928 MB; 102 MB (Emu68's kernel, JIT cache and MMU pool, GPU memory) are hidden.
+
+## 68k compiler flags (12.11.2026)
+
+`ncdemo`'s 68k path, `SECONDS=12 AUTO=6`. The native path stayed at 164 to 169 fps throughout.
+
+| Build | 68k fps | raster |
+|---|---:|---:|
+| release 1.5.0 binary (GCC 16.2.0b, `-m68040 -mhard-float`) | 44.3 | 18.7 ms |
+| GCC 16.2.1b, the same flags | 24.6 | 36.9 ms |
+| + `-fno-branch-count-reg` | 27.8 | 32.3 ms |
+| `-m68060` | 42.7 | 19.4 ms |
+| `-m68040 -mtune=68060 -fno-branch-count-reg` (the SDK default now) | 50.2 | 16.1 ms |
+| VBCC `-fpu=68040` | 24.0 | 37.4 ms |
+| VBCC `-fpu=68060` (the SDK default now) | 41.7 | 19.6 ms |
+
+Two things are expensive in Emu68's JIT: float to integer conversions the way a real 68040 needs them
+(save FPCR, set rounding, convert, restore; about 85 ns each), and loops closed with `DBF`. The new flags
+avoid both (NOTES.md 27). The "native is N times faster" figure of a program therefore depends on its
+68k build: 6.7x became 3.4x here with no change on the native side. Tables below this point were measured
+with the older flags and compilers.
 
 ## `bench`: checksums and matrices (29.10.2026, hypervisor 1)
 
@@ -82,7 +170,8 @@ Kernels: `transform`, `raster` (line bands), `present` (palette to RGB565). 68k 
 | library 1.2, hypervisor 2 | 44.6 fps | 169.3 fps | 3.8x |
 | library 1.3, hypervisor 2 | 43.9 fps | 165.1 fps | 3.8x |
 
-Successive runs vary between 165 and 169 fps. This demo uses `nc_run` (one core).
+Successive runs vary between 165 and 169 fps. These runs used `nc_run` (one core); for the current
+figures and the three-core mode see "Release 1.7" above.
 
 Per frame, library 1.2 (`ncdemo SECONDS=12 AUTO=6`):
 

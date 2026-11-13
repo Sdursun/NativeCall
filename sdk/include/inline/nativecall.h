@@ -92,4 +92,28 @@ typedef ULONG _sfdc_vararg;
       LP2(0x84, ULONG, NC_WaitJob , ULONG, ___job, d0, ULONG *, ___status, a0,\
       , NATIVECALL_BASE_NAME)
 
+#define NC_SetTimeout(___module, ___microseconds) \
+      LP2(0x8a, ULONG, NC_SetTimeout , APTR, ___module, a0, ULONG, ___microseconds, d0,\
+      , NATIVECALL_BASE_NAME)
+
+#define NC_ReadLog(___buffer, ___size, ___position) \
+      LP3(0x90, ULONG, NC_ReadLog , APTR, ___buffer, a0, ULONG, ___size, d0, ULONG *, ___position, a1,\
+      , NATIVECALL_BASE_NAME)
+
+#define NC_GetFaultInfo(___info) \
+      LP1(0x96, BOOL, NC_GetFaultInfo , struct NCFaultInfo *, ___info, a0,\
+      , NATIVECALL_BASE_NAME)
+
+#define NC_CancelJob(___job, ___status) \
+      LP2(0x9c, ULONG, NC_CancelJob , ULONG, ___job, d0, ULONG *, ___status, a0,\
+      , NATIVECALL_BASE_NAME)
+
+#define NC_GetStats(___stats) \
+      LP1(0xa2, BOOL, NC_GetStats , struct NCStats *, ___stats, a0,\
+      , NATIVECALL_BASE_NAME)
+
+#define NC_ListModules(___info, ___max) \
+      LP2(0xa8, ULONG, NC_ListModules , struct NCModuleInfo *, ___info, a0, ULONG, ___max, d0,\
+      , NATIVECALL_BASE_NAME)
+
 #endif /* !_INLINE_NATIVECALL_H */

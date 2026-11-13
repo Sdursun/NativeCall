@@ -108,6 +108,13 @@ void *memcpy(void *dst, const void *src, size_t n);
 void *memmove(void *dst, const void *src, size_t n);
 void *memset(void *dst, int c, size_t n);
 int memcmp(const void *a, const void *b, size_t n);
+
+/* Log (hypervisor 7+): text into the hypervisor's log, read on the Amiga with NCLog (or
+   NC_ReadLog). One call writes at most 255 bytes; every core may write. Nothing happens on
+   older hypervisors, and on the 68k side these do nothing at all.
+   nc_printf knows %d %i %u %x %X %p %s %c %%, the flags - and 0, a width, and l / ll / z. */
+void nc_log(const char *text);
+void nc_printf(const char *format, ...) __attribute__((format(printf, 1, 2)));
 #pragma GCC visibility pop
 
 #else /* 68k */
@@ -128,6 +135,9 @@ struct NCKernelSet
 
 #define NC__DECLARE_SET(prefix)     extern const struct NCKernelSet prefix##_kernels;
 #define NC_KERNEL(name)     NC_U32 name(void *params)
+/* The log exists only for native code: the 68k versions of kernels say nothing */
+#define nc_log(text)        ((void)0)
+#define nc_printf(...)      ((void)0)
 #define NC__FALLBACK(name)  name,
 
 /*

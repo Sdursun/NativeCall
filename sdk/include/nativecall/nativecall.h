@@ -84,6 +84,14 @@ BOOL nc_start_mp(struct NCKernels *k, struct NCJob *job, ULONG index, APTR param
 BOOL nc_done(struct NCKernels *k, struct NCJob *job);
 NC_U32 nc_wait(struct NCKernels *k, struct NCJob *job);
 
+/* Stops a job started with nc_start_mp: pieces that have not started are skipped, pieces that
+   run right now end (at most the time limit, nc_set_timeout), then like nc_wait. nc_status() is
+   NC_ST_CANCELLED and the result the sum of the pieces that ran; the job's output is incomplete.
+   Not needed before nc_close(): that cancels the jobs of its module. A program that ends
+   without nc_close() leaves its jobs running until the next program starts one (library 1.6,
+   hypervisor 7; otherwise this waits). */
+NC_U32 nc_cancel(struct NCKernels *k, struct NCJob *job);
+
 /* Always the 68k version (for comparisons) */
 NC_U32 nc_call_68k(struct NCKernels *k, ULONG index, APTR params);
 NC_U32 nc_run_68k(struct NCKernels *k, ULONG index, APTR params, ULONG from, ULONG to);
@@ -92,6 +100,13 @@ NC_U32 nc_run_68k(struct NCKernels *k, ULONG index, APTR params, ULONG from, ULO
    nc_open why there is no native module (NC_ST_NONE: no library/hypervisor, NC_ST_MISMATCH,
    NC_ST_NOMODULE) */
 ULONG nc_status(struct NCKernels *k);
+
+/* Time limit of one native call of these kernels (one piece of nc_run / nc_run_mp /
+   nc_start_mp) in microseconds; 0 = the hypervisor's default, 1 s. A kernel that runs longer
+   is stopped and the call ends with NC_ST_TIMEOUT: an endless loop no longer hangs the Amiga.
+   Its output is then incomplete and a lock it held stays taken. Needs library 1.6 and
+   hypervisor 6 (FALSE: not set; older hypervisors have no limit). */
+BOOL nc_set_timeout(struct NCKernels *k, ULONG microseconds);
 
 /* Native run time of kernel 'index' as the hypervisor measured it: calls, total, longest and
    last call in microseconds. The 68k cannot measure this itself (its interrupts wait while

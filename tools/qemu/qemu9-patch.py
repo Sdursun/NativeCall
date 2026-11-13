@@ -2,6 +2,8 @@
 #  1. WFE takes the HCR_EL2.TWE trap as on real cores (see tools/qemu/wfe-trap.py).
 #  2. raspi4b reports its RAM like the Pi firmware: one /memory node with two blocks, not a second
 #     node. Emu68 reads only the first node, so with two nodes it would never see the upper block.
+#  3. initrd properties in 32 bits as the Pi firmware writes them.
+#  4. raspi4b's GIC with the Security Extensions, as on the BCM2711 (see the end).
 import sys
 
 root = sys.argv[1]
@@ -58,3 +60,27 @@ patch("hw/arm/raspi4b.c",
 patch("hw/arm/raspi4b.c",
       "static int raspi_add_memory_node(void *fdt, hwaddr mem_base, hwaddr mem_len)",
       "__attribute__((unused)) static int raspi_add_memory_node(void *fdt, hwaddr mem_base, hwaddr mem_len)")
+
+# 4. The BCM2711's GIC-400 has the Security Extensions (QEMU's raspi4b leaves them out). With them
+#    the armstub's Secure setup at EL3 (Group 0 = the hypervisor's timer as FIQ, FIQEn) survives
+#    Emu68's own Non-secure GICD_CTLR / GICC_CTLR writes, as on the Pi (NOTES.md 26). Without
+#    them Emu68's "GICC_CTLR = 1" clears FIQEn and the time limit comes as an IRQ nobody takes.
+patch("hw/arm/bcm2838.c",
+      """    if (!object_property_set_bool(OBJECT(&s->gic),
+                                  "has-virtualization-extensions", true,
+                                  errp)) {
+        return;
+    }
+""",
+      """    if (!object_property_set_bool(OBJECT(&s->gic),
+                                  "has-virtualization-extensions", true,
+                                  errp)) {
+        return;
+    }
+
+    if (!object_property_set_bool(OBJECT(&s->gic),
+                                  "has-security-extensions", true,
+                                  errp)) {
+        return;
+    }
+""")

@@ -4,7 +4,8 @@
 
         ncdemo [WIDTH=<w>] [HEIGHT=<h>] [SEG=<n>] [SECONDS=<s>] [AUTO=<s>] [START68K]
 
-    N, Space or a mouse click switches 68k <-> native, Esc or Q quits.
+    N, Space or a mouse click go to the next mode (68k, native, native on all ARM cores),
+    Esc or Q quits.
     SECONDS quits after that long, AUTO switches by itself every <s> seconds (for unattended
     runs); a summary goes to the Shell at the end.
 
@@ -213,8 +214,8 @@ int main(void)
     int line_h, base;
     UBYTE *chunky = NULL;
     float *zbuf = NULL;
-    struct ModeStats st[2];          /* 0: 68k, 1: native */
-    int native = 0, quit = 0, rc = RETURN_OK, m;
+    struct ModeStats st[3];          /* 0: 68k, 1: native, 2: native on all cores */
+    int native = 0, nmodes = 1, quit = 0, rc = RETURN_OK, m;
     double t0, t1, t2, t3, start, last_switch;
     char line[120];
 
@@ -252,7 +253,8 @@ int main(void)
         rc = RETURN_FAIL;
         goto out;
     }
-    native = nc_is_native(k) && !args[ARG_START68K];
+    nmodes = !nc_is_native(k) ? 1 : nc_cores(k) > 1 ? 3 : 2;
+    native = args[ARG_START68K] ? 0 : nmodes - 1;
 
     verts = nc_alloc(nverts * sizeof(*verts));
     sverts = nc_alloc(nverts * sizeof(*sverts));
@@ -351,7 +353,7 @@ int main(void)
     rp->background = COL_BG;
 
     start = last_switch = now_s();
-    st[0].win_start = st[1].win_start = start;
+    st[0].win_start = st[1].win_start = st[2].win_start = start;
 
     while (!quit)
     {
@@ -365,39 +367,51 @@ int main(void)
             else if ((msg->Class == IDCMP_VANILLAKEY && (msg->Code == 'n' || msg->Code == 'N' || msg->Code == ' '))
                      || (msg->Class == IDCMP_MOUSEBUTTONS && msg->Code == SELECTDOWN))
             {
-                if (nc_is_native(k))
+                if (nmodes > 1)
                 {
-                    native = !native;
+                    native = (native + 1) % nmodes;
                     last_switch = now_s();
+                    st[native].win_frames = 0;      /* a fresh measurement window for the new mode */
+                    st[native].win_start = last_switch;
                 }
             }
             ReplyMsg((struct Message *)msg);
         }
         if (seconds && t >= seconds)
             quit = 1;
-        if (autosw && nc_is_native(k) && now_s() - last_switch >= autosw)
+        if (autosw && nmodes > 1 && now_s() - last_switch >= autosw)
         {
-            native = !native;
+            native = (native + 1) % nmodes;
             last_switch = now_s();
+            st[native].win_frames = 0;
+            st[native].win_start = last_switch;
         }
 
         m = native;
         set_rotation(cam->rot, t * 0.9, t * 0.6, t * 0.25);
 
+        /* The three kernels work on vertices or screen rows that do not depend on each other and
+           do not write their params: mode 2 gives them to all ARM cores (nc_run_mp) */
         t0 = now_s();
-        if (m)
+        if (m == 2)
+            nc_run_mp(k, NCK_transform, tp, sizeof(*tp), 0, nverts);
+        else if (m)
             nc_run(k, NCK_transform, tp, 0, nverts);
         else
             nc_run_68k(k, NCK_transform, tp, 0, nverts);
         t1 = now_s();
-        if (m)
+        if (m == 2)
+            nc_run_mp(k, NCK_raster, rp, sizeof(*rp), 0, height);
+        else if (m)
             nc_run(k, NCK_raster, rp, 0, height);
         else
             nc_run_68k(k, NCK_raster, rp, 0, height);
         t2 = now_s();
         if (bpp)
         {
-            if (m)
+            if (m == 2)
+                nc_run_mp(k, NCK_present, pp, sizeof(*pp), 0, height);
+            else if (m)
                 nc_run(k, NCK_present, pp, 0, height);
             else
                 nc_run_68k(k, NCK_present, pp, 0, height);
@@ -415,18 +429,29 @@ int main(void)
         }
 
         /* overlay */
-        sprintf(line, " %s ", m ? "NATIVE ARM (Cortex-A72)" : "68k (Emu68 JIT, " COMPILER ")");
+        if (m == 2)
+            sprintf(line, " NATIVE ARM on %lu cores ", (unsigned long)nc_cores(k));
+        else
+            sprintf(line, " %s ", m ? "NATIVE ARM (Cortex-A72)" : "68k (Emu68 JIT, " COMPILER ")");
         text(&scr->RastPort, 8, base, m ? COL_YELLOW : COL_WHITE, line);
         sprintf(line, " %5.1f fps  %ux%u, %lu triangles ", st[m].fps, (unsigned)width, (unsigned)height,
                 (unsigned long)ntris);
         text(&scr->RastPort, 8, base + line_h, COL_WHITE, line);
-        if (st[0].fps > 0 && st[1].fps > 0)
+        if (st[0].fps > 0 && (st[1].fps > 0 || st[2].fps > 0))
         {
-            sprintf(line, " 68k %.1f fps  vs  native %.1f fps  =  %.1fx ", st[0].fps, st[1].fps, st[1].fps / st[0].fps);
+            char *p = line;
+
+            p += sprintf(p, " 68k %.1f fps", st[0].fps);
+            if (st[1].fps > 0)
+                p += sprintf(p, "  native %.1f (%.1fx)", st[1].fps, st[1].fps / st[0].fps);
+            if (st[2].fps > 0)
+                p += sprintf(p, "  native MP %.1f (%.1fx)", st[2].fps, st[2].fps / st[0].fps);
+            strcpy(p, " ");
             text(&scr->RastPort, 8, base + 2 * line_h, COL_YELLOW, line);
         }
         text(&scr->RastPort, 8, height - 6, COL_WHITE,
-             nc_is_native(k) ? " N / click: 68k <-> native    Esc: quit " : " no native calls on this machine    Esc: quit ");
+             nmodes > 1 ? " N / click: next mode (68k, native, native on all cores)    Esc: quit "
+                        : " no native calls on this machine    Esc: quit ");
         t3 = now_s();
 
         st[m].frames++;
@@ -441,24 +466,22 @@ int main(void)
             st[m].win_frames = 0;
             st[m].win_start = t3;
         }
-        if (m != native)
-        {
-            /* switched: start a fresh measurement window for the new mode */
-            st[native].win_frames = 0;
-            st[native].win_start = now_s();
-        }
     }
 
     printf("\nncdemo %lux%lu, %lu triangles, 68k part built with %s\n\n", (unsigned long)width,
            (unsigned long)height, (unsigned long)ntris, COMPILER);
-    printf("  mode     frames    fps   transform    raster   display  (ms per frame)\n");
-    for (m = 0; m < 2; m++)
+    printf("  mode       frames    fps   transform    raster   display  (ms per frame)\n");
+    for (m = 0; m < 3; m++)
         if (st[m].frames)
-            printf("  %-7s %7lu %6.1f %10.2f %9.2f %9.2f\n", m ? "native" : "68k", (unsigned long)st[m].frames,
+            printf("  %-9s %7lu %6.1f %10.2f %9.2f %9.2f\n", m == 2 ? "native MP" : m ? "native" : "68k",
+                   (unsigned long)st[m].frames,
                    st[m].frames / st[m].total, 1000 * st[m].transform / st[m].frames,
                    1000 * st[m].raster / st[m].frames, 1000 * st[m].display / st[m].frames);
     if (st[0].frames && st[1].frames)
         printf("\n  native is %.1fx faster\n", (st[1].frames / st[1].total) / (st[0].frames / st[0].total));
+    if (st[0].frames && st[2].frames)
+        printf("%s  native MP (%lu ARM cores) is %.1fx faster\n", st[1].frames ? "" : "\n",
+               (unsigned long)nc_cores(k), (st[2].frames / st[2].total) / (st[0].frames / st[0].total));
     {
         static const char *names[] = { "transform", "raster", "present" };
         struct NCKernelStats ks;

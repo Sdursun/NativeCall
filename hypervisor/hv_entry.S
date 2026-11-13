@@ -60,9 +60,14 @@ hv_entry:
         msr     CNTVOFF_EL2, xzr
         ldr     x2, =CPTR_EL2_INIT
         msr     CPTR_EL2, x2
+#if defined(HV_S2) || defined(HV_RESETSPY)
+        ldr     x2, =(HCR_RW | HCR_TPC | HCR_FMO | HCR_VM)     /* stage 2: hv_init set VTTBR/VTCR */
+#else
         msr     VTTBR_EL2, xzr
-        ldr     x2, =(HCR_RW | HCR_TPC)
+        ldr     x2, =(HCR_RW | HCR_TPC | HCR_FMO)
+#endif
         msr     HCR_EL2, x2
+        msr     CNTHP_CTL_EL2, xzr      /* time limit off until native code runs */
 
         ldr     x2, =SCTLR_EL1_INIT
         msr     SCTLR_EL1, x2
@@ -104,7 +109,7 @@ hv_secondary_spin:
 hv_secondary:
         mrs     x6, MPIDR_EL1
         and     x6, x6, #3
-        mov     x7, #HV_HELPER_MASK
+        mov     x7, #HV_CAPTURE_MASK
         lsr     x7, x7, x6
         tbz     x7, #0, hv_to_emu68
         /* only RAM our EL2 map has (hv.c): 16 MB .. 0xFC000000 and 4 .. 8 GB */
@@ -166,6 +171,7 @@ hv_secondary:
         mrs     x2, MDCR_EL2
         orr     x2, x2, #MDCR_TPM
         msr     MDCR_EL2, x2
+        msr     CNTHP_CTL_EL2, xzr      /* time limit off (its reset value is UNKNOWN) */
         isb
         mov     x0, x19
 
@@ -196,11 +202,11 @@ hv_vectors:
         ventry  hv_panic                /*                     serr */
         ventry  hv_native_fault         /* current EL, SP_ELx: sync (native code crashed) */
         ventry  hv_panic
-        ventry  hv_panic
+        ventry  hv_native_timeout       /*                     fiq  (time limit of native code) */
         ventry  hv_panic
         ventry  hv_lower_sync           /* lower EL, AArch64: sync (the DC trap) */
         ventry  hv_panic
-        ventry  hv_panic
+        ventry  hv_stray_fiq            /*                     fiq  (a late time limit) */
         ventry  hv_panic
         ventry  hv_panic                /* lower EL, AArch32 */
         ventry  hv_panic
@@ -261,22 +267,33 @@ hv_panic:
         mrs     x0, ESR_EL2
         mrs     x1, ELR_EL2
         mrs     x2, FAR_EL2
+        mrs     x4, MPIDR_EL1
+        and     x4, x4, #3
         adr     x3, hv_panic_info
+        add     x3, x3, x4, lsl #5      /* 4 x 8 bytes per core: ESR, ELR, FAR, count */
         stp     x0, x1, [x3]
         str     x2, [x3, #16]
+        ldr     x0, [x3, #24]
+        add     x0, x0, #1
+        str     x0, [x3, #24]
+        dsb     sy
 1:      wfe
         b       1b
 
 /* ---- Native call ------------------------------------------------------------------------------
 
-   uint32_t nc_call_native(uintptr_t fn, uintptr_t params)
+   uint32_t nc_call_native(uintptr_t fn, uintptr_t params, uint64_t limit)
 
    The caller (hv.c) is built with -mgeneral-regs-only, so Emu68's FP/SIMD state (v8-v15 =
    FP0-FP7, v19-v21 = SR/FPSR/context, ...) is still live here. Save all of it, run the native
    code with a default FPCR, restore.
 
+   limit != 0: counter ticks the native code may run. The EL2 timer is armed and FIQs are let in
+   only around the native code itself (hv_config.h).
+
    If the native code takes an exception, hv_native_fault returns here with w0 = 0xffffffff
-   and hv_fault_flag = 1. */
+   and fault_flag = FAULT_CRASH; past its limit hv_native_timeout does the same with
+   FAULT_TIMEOUT. */
 
 #define FRAME_FPCR  0
 #define FRAME_Q     16
@@ -287,6 +304,7 @@ nc_call_native:
         stp     x29, x30, [sp, #-16]!
         mov     x29, sp
         sub     sp, sp, #FRAME_SIZE
+        mov     x9, x2                  /* limit; x2/x3 are scratch below */
 
         stp     q0,  q1,  [sp, #(FRAME_Q + 0 * 16)]
         stp     q2,  q3,  [sp, #(FRAME_Q + 2 * 16)]
@@ -327,9 +345,23 @@ nc_call_native:
         msr     FPSR, xzr
         mov     x16, x0
         mov     x0, x1
+
+        cbz     x9, 1f
+        isb
+        mrs     x2, CNTPCT_EL0
+        add     x2, x2, x9
+        msr     CNTHP_CVAL_EL2, x2
+        mov     x2, #1                  /* ENABLE, not masked */
+        msr     CNTHP_CTL_EL2, x2
+        isb
+        msr     DAIFClr, #1             /* FIQ */
+1:
         blr     x16
 
 nc_native_return:
+        msr     DAIFSet, #1
+        msr     CNTHP_CTL_EL2, xzr      /* drops the timer's interrupt line */
+        isb
         mrs     x2, TPIDR_EL2
         str     wzr, [x2, #CPU_IN_NATIVE]
 
@@ -357,9 +389,38 @@ nc_native_return:
         ldp     x29, x30, [sp], #16
         ret
 
+/* Native code took an exception: x0-x30 and sp into this core's hv_cpu.regs (NCFaultInfo).
+   Neither the native stack nor any register may be trusted or clobbered first, so x5 waits in
+   CNTHP_CVAL_EL2: a full 64-bit register of the time limit, which is switched off on every way
+   out of here (nc_native_return), with FIQs masked meanwhile. Leaves x5 = this core's hv_cpu. */
+        .macro  save_native_regs
+        msr     CNTHP_CVAL_EL2, x5
+        mrs     x5, TPIDR_EL2
+        stp     x0,  x1,  [x5, #(CPU_REGS + 0 * 8)]
+        stp     x2,  x3,  [x5, #(CPU_REGS + 2 * 8)]
+        str     x4,       [x5, #(CPU_REGS + 4 * 8)]
+        stp     x6,  x7,  [x5, #(CPU_REGS + 6 * 8)]
+        stp     x8,  x9,  [x5, #(CPU_REGS + 8 * 8)]
+        stp     x10, x11, [x5, #(CPU_REGS + 10 * 8)]
+        stp     x12, x13, [x5, #(CPU_REGS + 12 * 8)]
+        stp     x14, x15, [x5, #(CPU_REGS + 14 * 8)]
+        stp     x16, x17, [x5, #(CPU_REGS + 16 * 8)]
+        stp     x18, x19, [x5, #(CPU_REGS + 18 * 8)]
+        stp     x20, x21, [x5, #(CPU_REGS + 20 * 8)]
+        stp     x22, x23, [x5, #(CPU_REGS + 22 * 8)]
+        stp     x24, x25, [x5, #(CPU_REGS + 24 * 8)]
+        stp     x26, x27, [x5, #(CPU_REGS + 26 * 8)]
+        stp     x28, x29, [x5, #(CPU_REGS + 28 * 8)]
+        str     x30,      [x5, #(CPU_REGS + 30 * 8)]
+        mrs     x0, CNTHP_CVAL_EL2
+        str     x0,       [x5, #(CPU_REGS + 5 * 8)]
+        mov     x0, sp
+        str     x0,       [x5, #(CPU_REGS + 31 * 8)]
+        .endm
+
 /* Synchronous exception at EL2. Only recoverable while native code runs. */
 hv_native_fault:
-        mrs     x5, TPIDR_EL2
+        save_native_regs
         ldr     w3, [x5, #CPU_IN_NATIVE]
         cbz     w3, hv_panic
         str     wzr, [x5, #CPU_IN_NATIVE]
@@ -370,9 +431,10 @@ hv_native_fault:
         add     x2, x5, #CPU_FAULT_INFO
         stp     x0, x1, [x2]
         str     x4, [x2, #16]
-        mov     w3, #1
+        mov     w3, #FAULT_CRASH
         str     w3, [x5, #CPU_FAULT_FLAG]
 
+hv_native_unwind:                       /* x5 = this core's struct hv_cpu */
         add     x2, x5, #CPU_JMPBUF
         ldp     x19, x20, [x2, #(0 * 8)]
         ldp     x21, x22, [x2, #(2 * 8)]
@@ -384,9 +446,45 @@ hv_native_fault:
         mov     w0, #0xffffffff
         b       nc_native_return
 
+/* FIQ at EL2: the time limit of the native code ran out. ESR/FAR mean nothing for an interrupt:
+   0, and ELR = where the native code was. Outside native code (cannot happen: FIQs are masked
+   there) it is only switched off. */
+hv_native_timeout:
+        msr     CNTHP_CTL_EL2, xzr
+        isb
+        save_native_regs
+        ldr     w3, [x5, #CPU_IN_NATIVE]
+        cbnz    w3, 1f
+        ldr     x0, [x5, #(CPU_REGS + 0 * 8)]
+        ldr     x3, [x5, #(CPU_REGS + 3 * 8)]
+        ldr     x5, [x5, #(CPU_REGS + 5 * 8)]
+        eret
+1:
+        str     wzr, [x5, #CPU_IN_NATIVE]
+        add     x2, x5, #CPU_FAULT_INFO
+        mrs     x4, ELR_EL2
+        stp     xzr, xzr, [x2]
+        str     x4, [x2, #16]
+        mov     w3, #FAULT_TIMEOUT
+        str     w3, [x5, #CPU_FAULT_FLAG]
+        b       hv_native_unwind
+
+/* FIQ from EL1: a time limit that fired just as the native code returned. Switch it off. */
+hv_stray_fiq:
+        msr     CNTHP_CTL_EL2, xzr
+        isb
+        eret
+
+/* void hv_get_vregs(uint8_t out[48]): the 68k state Emu68 keeps in v19-v21 (diagnosis) */
+        .globl  hv_get_vregs
+hv_get_vregs:
+        stp     q19, q20, [x0]
+        str     q21, [x0, #32]
+        ret
+
         .ltorg
 
         .bss
         .balign 8
         .globl  hv_panic_info
-hv_panic_info:  .space  3 * 8           /* ESR, ELR, FAR of a panic */
+hv_panic_info:  .space  4 * 4 * 8       /* per core: ESR, ELR, FAR of a panic, count (hv.c logs them) */

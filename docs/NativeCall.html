@@ -39,7 +39,7 @@
 
 <h1>NativeCall</h1>
 <p class="lead">Native ARM code for 68k Amiga programs on a PiStorm with a Raspberry Pi 4, without changing Emu68.</p>
-<p class="meta">Version 1.6.0: <code>nativecall.library</code> 1.5, hypervisor 5. November 2026.</p>
+<p class="meta">Version 1.7.0: <code>nativecall.library</code> 1.7, hypervisor 8. November 2026.</p>
 
 <h2>What it is</h2>
 <p>A PiStorm replaces the Amiga's 68000-class CPU with a Raspberry Pi. Emu68 runs on the Pi and translates 68k code to
@@ -61,16 +61,24 @@ shared library. Commenting out that one line returns the machine to how it was.<
 <table>
   <tr><th>Workload</th><th class="n">68k (Emu68 JIT)</th><th class="n">Native</th><th class="n">Gain</th></tr>
   <tr><td>CRC32 of 4 MB, ARM CRC32 instruction</td><td class="n">52.11 ms</td><td class="n">2.38 ms</td><td class="n"><b>21.9x</b></td></tr>
+  <tr><td>Ray tracing, 3 cores</td><td class="n">1.9 fps</td><td class="n">33.6 fps</td><td class="n"><b>18.4x</b></td></tr>
+  <tr><td>Rotate, scale and 3x3 filter, 3 cores</td><td class="n">9.7 fps</td><td class="n">125.3 fps</td><td class="n"><b>15.5x</b></td></tr>
+  <tr><td>1500-body gravity, 3 cores</td><td class="n">6.0 fps</td><td class="n">61.0 fps</td><td class="n"><b>10.9x</b></td></tr>
   <tr><td>4x4 matrix × 10 000 vertices, NEON</td><td class="n">1.01 ms</td><td class="n">0.11 ms</td><td class="n"><b>9.2x</b></td></tr>
   <tr><td>Mandelbrot zoom, NEON on 3 cores</td><td class="n">3.2 fps</td><td class="n">27.1 fps</td><td class="n"><b>8.8x</b> (iterations/s)</td></tr>
   <tr><td>Adler32 of 4 MB, NEON</td><td class="n">19.86 ms</td><td class="n">2.77 ms</td><td class="n"><b>7.2x</b></td></tr>
-  <tr><td>Software 3D torus, 1 core</td><td class="n">44.6 fps</td><td class="n">169.3 fps</td><td class="n"><b>3.8x</b></td></tr>
+  <tr><td>MP3 decoding, 1 core</td><td class="n">27.8x real time</td><td class="n">198x real time</td><td class="n"><b>7.1x</b></td></tr>
+  <tr><td>Voxel landscape, 3 cores</td><td class="n">40.7 fps</td><td class="n">198.3 fps</td><td class="n"><b>6.0x</b></td></tr>
+  <tr><td>Software 3D torus, 3 cores</td><td class="n">50.4 fps</td><td class="n">204.6 fps</td><td class="n"><b>4.1x</b></td></tr>
   <tr><td>Same plain C code, 1 core</td><td class="n"></td><td class="n"></td><td class="n">1.4x to 2.4x</td></tr>
   <tr><td>GPU-limited demo (Boing Ocean)</td><td class="n">55.3 fps</td><td class="n">55.8 fps</td><td class="n">+0.9%</td></tr>
 </table>
 <p>Two lessons sit in this table. Emu68's JIT is already good, so plain C gains only about 2x: the large gains come
 from what the 68k has no equivalent of. And a program whose frame time goes to the GPU gains almost nothing, because
 the CPU was not what held it back.</p>
+<p>The gains of the graphics demos compare the time to compute a frame; the copy to the screen costs the same on both
+sides. A gain also depends on how well the 68k side was compiled: with better compiler flags for Emu68, the 68k
+version of the 3D demo doubled its speed, and its gain on one core went from 6.7x to 3.4x.</p>
 
 <figure>
   <img src="images/mandeldemo.png" alt="Mandelbrot demo showing iterations per second for each mode">
@@ -149,7 +157,8 @@ Amiga reset. Now every other <code>dc civac</code> is only redone on its physica
 <ul>
   <li>The function must be an entry of a checked module; the hypervisor does not jump to arbitrary addresses.</li>
   <li>All of Emu68's floating point and vector registers are saved first, because they hold live 68k state.</li>
-  <li>Kernels get their own memory map that leaves out the low 16 MB: chip RAM and hardware registers. A bad pointer ends the call with <code>NC_ST_FAULT</code> and the machine goes on. An endless loop, however, does lock it.</li>
+  <li>Kernels get their own memory map with only the RAM the 68k sees above 16 MB. Chip RAM and hardware registers are not in it, nor is Emu68's private memory (its kernel, its translated code); the hypervisor's own code is read-only, and every stack ends in a guard page. A bad pointer or a stack overflow ends the call with <code>NC_ST_FAULT</code> and the machine goes on.</li>
+  <li>Every call has a time limit, 1 second unless the program sets another. Before the kernel starts, the hypervisor arms the EL2 timer; the armstub has routed that interrupt as a Group 0 FIQ, which Emu68 neither uses nor can change. A kernel caught in an endless loop is stopped and the call returns <code>NC_ST_TIMEOUT</code>.</li>
   <li>Emu68 runs AArch64 in big-endian mode, so kernels are built <code>-mbig-endian</code> and 68k data needs no conversion.</li>
 </ul>
 
@@ -169,15 +178,26 @@ core gets its own copy of the parameters, with its piece in them, and the result
 <h3>6. Asynchronous jobs</h3>
 <p><code>nc_start_mp</code> gives a job to the helper cores and returns after about 8 µs. The 68k carries on, with interrupts and multitasking running.
 <code>nc_wait</code> collects the result; if the job has not finished, core 0 helps in steps of at most 0.5 ms. In a test, a job finished in half
-the single-core time while the 68k never stopped.</p>
+the single-core time while the 68k never stopped. <code>nc_cancel</code> stops a job, and the jobs of a program that exits or crashes are cancelled
+for it. The MP3 demo decodes this way: an idle core fills the next buffer while the 68k only hands buffers to AHI.</p>
+
+<h3>7. Seeing what happens</h3>
+<p>A kernel cannot open a window or print. Instead it writes to a log in the hypervisor with <code>nc_printf</code>, and <code>NCLog</code> on the
+Amiga prints it. After a fault, <code>NCLog FAULT</code> shows the ARM registers and a backtrace, and <code>nc addr2line</code> on the PC turns
+that into source lines. The hypervisor also counts, per core, the time spent in native code. <code>NCStatus</code> shows it
+with the temperature and the programs that have native modules loaded; <code>NCLog STATS</code> prints the same in the Shell.</p>
+<figure>
+  <img src="images/ncstatus.png" alt="NCStatus window: three cores at 85 percent native load, temperature 73.5 degrees, mandeldemo in the program list, the hypervisor log below">
+  <figcaption><code>NCStatus</code> on the A1200 while <code>mandeldemo</code> runs on three cores.</figcaption>
+</figure>
 
 <h2>Using it</h2>
 <h3>Install</h3>
 <ol>
   <li>Back up <code>config.txt</code> from the SD card's FAT partition.</li>
   <li>Copy <code>nativecall-armstub.bin</code> to that partition, and add <code>armstub=nativecall-armstub.bin</code> below <code>arm_64bit=1</code>.</li>
-  <li>Copy <code>nativecall.library</code> to <code>LIBS:</code>.</li>
-  <li>Power the Amiga off and on. Run <code>hello LOOP=1000 FAULT</code> to check.</li>
+  <li>Copy <code>nativecall.library</code> to <code>LIBS:</code>, <code>NCLog</code> and <code>PiReboot</code> to <code>C:</code>, and <code>NCStatus</code> wherever you like.</li>
+  <li>Power the Amiga off and on. Run <code>hello LOOP=1000 FAULT TIMEOUT</code> and <code>NCLog STATS</code> to check.</li>
 </ol>
 <div class="box warn"><p><b>Tested on an 8 GB Pi 4.</b> The hypervisor finds its place in the device tree, so other RAM sizes should work (tested in QEMU), and if the
 layout is unexpected Emu68 simply starts without native calls. To go back, put a <code>#</code> in front of the line, using a PC if necessary.</p></div>
@@ -231,23 +251,44 @@ cd myprog
   <li><b>Use what the 68k lacks:</b> NEON, special instructions, several cores.</li>
   <li><b>Look for CPU-limited work.</b> Software rendering, audio decoding and checksums gain. GPU-limited drawing does not.</li>
   <li><b>Rules:</b> no AmigaOS calls; only Fast RAM above 16 MB; no writes to the parameters and only to your own output range under <code>nc_run_mp</code>; less than 32 KB of local variables.</li>
+  <li><b>Mind the 68k stack.</b> The 68k version of a kernel runs on the caller's stack, and a Shell gives a program 4 KB.</li>
 </ul>
+
+<h3>The examples</h3>
+<table>
+  <tr><th>Program</th><th>What it shows</th></tr>
+  <tr><td><code>hello</code></td><td>every feature as a small test: calls, faults, cores, jobs, time limit, log, protection, cancel</td></tr>
+  <tr><td><code>bench</code>, <code>cputest</code></td><td>checksums, matrices, primes, Mandelbrot: 68k against native against NEON</td></tr>
+  <tr><td><code>ncdemo</code></td><td>software 3D with a z-buffer, the pattern for games</td></tr>
+  <tr><td><code>mandeldemo</code></td><td>NEON intrinsics and <code>nc_run_mp</code></td></tr>
+  <tr><td><code>raydemo</code></td><td>real-time ray tracing with mirror spheres and shadows</td></tr>
+  <tr><td><code>voxeldemo</code></td><td>flight over a height map</td></tr>
+  <tr><td><code>nbodydemo</code></td><td>gravity between 1500 bodies, a step that several cores can share</td></tr>
+  <tr><td><code>filterdemo</code></td><td>image rotation and 3x3 filters, two kernels in a row</td></tr>
+  <tr><td><code>mp3demo</code></td><td>an MP3 player whose decoder runs on an idle core</td></tr>
+</table>
+<p>In the graphics demos the keys <code>1</code> to <code>3</code> switch between 68k, native and native on all cores while the picture runs.</p>
 
 <h2>How it was tested</h2>
 <p><b>In QEMU, before hardware.</b> An unmodified Emu68 boots under the hypervisor on QEMU's Pi 3 and Pi 4 models, also started by the real armstub the way the firmware does it, and a bare 68k program exercises each request: spoofed blocks, ping, cache sync,
-native calls, caught faults, invalid entries, 1000-call loops, core capture, shared jobs, asynchronous jobs and full job slots. QEMU needed a small patch to trap <code>wfe</code>
-as real cores do. The device tree parser is tested alone on 16 layouts. QEMU proves the protocol but not the speed, and it has no real Pi 4 firmware, GIC or caches.</p>
+native calls, caught faults, invalid entries, 1000-call loops, core capture, shared jobs, asynchronous jobs and full job slots, endless kernels, the log, fault details,
+forbidden memory, cancelled jobs and statistics. QEMU needed small patches: to trap <code>wfe</code> as real cores do, and to model the Pi 4's interrupt controller
+with its security extensions. The device tree parser is tested alone on 16 layouts. QEMU proves the protocol but not the speed, and it has no real Pi 4 firmware or caches.</p>
 <p><b>On the A1200.</b> Example programs check results against the 68k version, count which core did what, verify the allocator on both sides, and measure call costs. During
-5 million native calls, 5 × 16 MB were copied over the network with matching checksums while Workbench kept responding.</p>
-<p><b>In WinUAE.</b> With no hypervisor, and with and without the library, programs from both compilers took the 68k path with correct results.</p>
+5 million native calls, 5 × 16 MB were copied over the network with matching checksums while Workbench kept responding. For this release, all ten examples built by
+both compilers ran from the release binaries, and the checksum benchmark ran 350 times in a row.</p>
+<p><b>In WinUAE.</b> With no hypervisor, and with and without the library, programs from both compilers took the 68k path with correct results (release 1.5.0).</p>
 <p>Bugs found this way shaped the design: a black screen on the first boot from a skipped cache flush, the phantom requests described above, wrong results from a
 code model that assumed page alignment, and a saved processor state overwritten by a native fault. They are written up in <code>NOTES.md</code>.</p>
+<div class="box warn"><p><b>If you built modules with SDK 1.5.0 or 1.6.0, rebuild them.</b> Those SDKs left a module's zero-initialised variables out of the
+module file, so a kernel with static or global variables wrote past its module and could corrupt memory: a rare reset that took a day to find, because it looked like
+a hypervisor bug. Library 1.6 and newer also keep 64 KB of slack behind every module.</p></div>
 
 <h2>Limitations</h2>
 <ul>
   <li>All hardware results come from one machine, an 8 GB Pi 4. Other RAM sizes are tested in QEMU only.</li>
-  <li>An endless loop in a kernel locks the machine. There is no stack guard (64 KB per core).</li>
-  <li>If a program crashes during an asynchronous job, a helper core may write to freed memory.</li>
+  <li>A kernel stopped by the time limit or a fault may leave its output half written and a lock taken; the program should reload the module or report the error.</li>
+  <li>The time limit needs the Pi 4's interrupt controller, the default; an armstub built for <code>enable_gic=0</code> has none.</li>
   <li>Three cores at full load heat a Pi 4 past 80 °C without cooling, and it slows down: the Mandelbrot demo dropped from 27 to 24 fps.</li>
   <li><code>async_log</code> and <code>ppc_enable</code> with several cores are understood from the Emu68 source but have not been tested.</li>
 </ul>

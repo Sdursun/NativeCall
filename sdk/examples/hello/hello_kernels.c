@@ -133,4 +133,116 @@ NC_KERNEL(heap)
     return nc_heap_avail(h);
 }
 
+NC_KERNEL(spin)
+{
+    (void)params;
+#if NC_NATIVE
+    for (;;)
+        __asm__ volatile("" ::: "memory");
+#else
+    return 0;
+#endif
+}
+
+NC_KERNEL(logtest)
+{
+    NC_U32 core = 0;
+
+    (void)params;
+#if NC_NATIVE
+    uint64_t mpidr;
+    __asm__ volatile("mrs %0, MPIDR_EL1" : "=r"(mpidr));
+    core = mpidr & 3;
+#endif
+    nc_printf("logtest: core %u, %s, %d, 0x%08x, [%5u] [%-4d] %c%%\n", (unsigned)core, "text", -42,
+              0xC0FFEEu, 7u, 3, 'z');
+    (void)core;
+    return 1;
+}
+
+#if NC_NATIVE
+/* Not inlined, and each one does something after its call: no tail calls, real frames */
+static __attribute__((noinline)) NC_U32 df3(volatile NC_U32 *p)
+{
+    return *p;
+}
+
+static __attribute__((noinline)) NC_U32 df2(volatile NC_U32 *p)
+{
+    NC_U32 r = df3(p);
+    __asm__ volatile("" ::: "memory");
+    return r + 2;
+}
+
+static __attribute__((noinline)) NC_U32 df1(volatile NC_U32 *p)
+{
+    NC_U32 r = df2(p);
+    __asm__ volatile("" ::: "memory");
+    return r + 1;
+}
+#endif
+
+NC_KERNEL(deepfault)
+{
+#if NC_NATIVE
+    uintptr_t addr = 0x8;
+
+    (void)params;
+    __asm__("" : "+r"(addr));
+    return df1((volatile NC_U32 *)addr) + 1;
+#else
+    return params == 0;
+#endif
+}
+
+#if NC_NATIVE
+#include <nativecall/nc_abi.h>
+
+/* 1 KB of locals per level and work after the call: no tail call, the stack really grows.
+   Endless on purpose: the guard page stops it. */
+#pragma GCC diagnostic ignored "-Winfinite-recursion"
+static __attribute__((noinline)) NC_U32 deep(volatile NC_U32 n)
+{
+    volatile NC_U32 pad[256];
+
+    pad[0] = n;
+    pad[255] = deep(n + 1);
+    return pad[0] + pad[255];
+}
+#endif
+
+NC_KERNEL(protect)
+{
+#if NC_NATIVE
+    struct AddParams *p = params;
+    const struct NCEnv *env;
+    uintptr_t cpu;
+
+    __asm__ volatile("mrs %0, TPIDR_EL2" : "=r"(cpu));
+    env = cpu >= 0x01000000UL ? *(const struct NCEnv * const *)(cpu + NC_CPU_ENV) : 0;
+    if ((uintptr_t)env < 0x01000000UL || env->magic != NC_ENV_MAGIC || env->version < 7)
+        return 0xEEEE;
+    switch (p->a)
+    {
+        case 0:
+        {
+            volatile NC_U32 *code = (volatile NC_U32 *)(uintptr_t)env->log_write;
+            *code = *code;
+            break;
+        }
+        case 1:
+        {
+            uintptr_t below = (cpu & ~(uintptr_t)0x1fffff) - 0x100000;
+            return *(volatile NC_U32 *)below;
+        }
+        case 2:
+            return deep(0);
+    }
+    return 0;
+#else
+    (void)params;
+    return 0xEEEE;
+#endif
+}
+
 NC_MODULE(hello, HELLO_KERNELS)

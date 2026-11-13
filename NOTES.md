@@ -422,12 +422,260 @@ rate; see RESULTS.md.
   matrices NEON 11.6x. Temperature 46–49 °C.
 - No real test on a 1, 2 or 4 GB Pi yet.
 
+## 26. Robustness: time limit, log, fault details, memory protection, job cancel (hypervisor 6 and 7, library 1.6)
+
+### 26.1 What was missing
+
+| Gap | Behaviour before | Solution |
+|---|---|---|
+| Endless loop | Core 0: the machine locks. Cores 1/3: the core and the job are lost, `nc_wait` never returns | EL2 timer (`CNTHP`, PPI 26) as an FIQ, armed only while native code runs; past the limit the call ends through the fault path with `NC_ST_TIMEOUT` (26.2) |
+| No output from native code | Only ESR/FAR/ELR | A ring buffer in the hypervisor, `nc_log`/`nc_printf` on the native side, `NC_OP_LOGREAD` and the `NCLog` tool (26.4) |
+| Fault details | ESR, FAR, ELR | x0–x30, SP and the frame pointer chain as module offsets; `nc addr2line` on the PC (26.4) |
+| Memory protection | Native code at EL2 could write to all RAM, including Emu68's kernel and JIT and the hypervisor's own tables | Hypervisor code and page tables read-only, guard pages under the stacks, Emu68's private memory taken out of the native map (26.5) |
+| Abandoned jobs | A program that exits or crashes without `nc_wait` leaves helpers writing to freed memory | `NC_OP_CANCEL`; the library cancels on unload and for dead tasks (26.8) |
+| Other hardware | Only a Pi 4 with 8 GB was seen | 1/2/4 GB: hypervisor 5 is ready, hardware is needed. CM4 and Pi 400 have the same BCM2711. Pi 3A+ and Zero 2 W (BCM2837) need an armstub of their own: peripherals at `0x3F000000`, the old interrupt controller, no GIC. Not done |
+| Emu68 versions | The hypervisor relies on Emu68's internals (D0/D1 in x19/x20, `CPUSHL` → `dc civac`, a PMU access on secondary cores, the idle `wfe` loop) | Most changes fail safe (no PING reply → 68k path; no helpers → one core). New Emu68 versions should be run in QEMU |
+
+### 26.2 Time limit (hypervisor 6)
+
+- **Why an FIQ:** Emu68 uses Group 1 IRQs of the GIC on core 0 (Amiga level 6, `vectors.c:2420`) and `CNTP` on
+  core 3 for PPC. It never touches the EL2 timer (`CNTHP`) or FIQs. Taking IRQs to EL2 (`HCR_EL2.IMO`) would steal
+  Emu68's interrupts too.
+- **armstub (EL3, every core):** PPI 26 in Group 0, priority 0, enabled; `GICC_CTLR = 0x1ef` (FIQEn). These are
+  Secure bits: Emu68's Non-secure writes of `GICD_CTLR = 1` / `GICC_CTLR = 1` cannot change them.
+- **Hypervisor:** `HCR_EL2.FMO` (core 0 at boot, helpers in the PMU trap). `nc_call_native(fn, params, limit)` sets
+  `CNTHP_CVAL = now + limit`, `CNTHP_CTL = 1`, then `DAIFClr #1` and runs the native code. On return FIQs are
+  masked and the timer is off. An FIQ at EL2 → `hv_native_timeout`: timer off, ELR saved, return through the
+  fault recovery path (`hv_native_unwind`) with `fault_flag = FAULT_TIMEOUT`. A late FIQ from EL1 is only
+  switched off.
+- **ABI:** `info[5]` = limit in µs (CALL, RUNMP, START; per piece for RUNMP/START), 0 = 1 s. `NC_ST_TIMEOUT` 0x87,
+  info as for a fault (ESR 0, FAR 0, ELR). PING `info[7]` = `NC_FEAT_*`.
+- **Self-test:** on every PING the hypervisor spins its own code for 200 µs with a 50 µs limit; if the FIQ comes,
+  it reports `NC_FEAT_TIMEOUT`. Without an FIQ path (`enable_gic=0`, another armstub) that costs 200 µs, not the
+  machine.
+- **Old library:** 1.5 does not clear `info[5]`. What is left there (an ELR ≥ 16 MB, an ESR, 0 after PING) always
+  means ≥ 16 s or the default: the limit gets looser, never tighter.
+- **Library 1.6:** a limit per module (`NC_SetTimeout`, LVO −138, so programs cannot change each other's limit),
+  `info[5]` written with every request, `NC_ST_TIMEOUT` recorded for `NC_LastFault`. SDK: `nc_set_timeout(k, us)`.
+  `hello TIMEOUT`; kernel `spin` in `hello` (added at the end, older entry numbers unchanged).
+- **Found in QEMU:** raspi4b's GIC is modelled without Security Extensions; Emu68's `gic_local_init` on core 0
+  cleared FIQEn, and the timer arrived as an IRQ nobody took (`-trace gic_*`). The GIC-400 in the BCM2711 has
+  the extensions: patch 4 in `tools/qemu/qemu9-patch.py`.
+- **Limit of the limit:** after a time-out the kernel's output is half written and a lock it held (for example
+  `nc_heap`'s) stays taken. The module's state is unknown: reload it or report the error.
+
+### 26.3 Hypervisor 6 on the A1200
+
+- `hello LOOP=1000 FAULT MP ASYNC TIMEOUT` (GCC and VBCC, and `HEAP`) passed; the self-test reported
+  `NC_FEAT_TIMEOUT`.
+  - `nc_call(spin)` with a 20 ms limit: `0x87` after 21.2–21.5 ms, ELR inside the module; then `add` = 42.
+  - `nc_run_mp(spin)`: `0x87` after 20.5–21.0 ms. `nc_start_mp(spin)` + `nc_wait`: `0x87` after 20.2–20.4 ms.
+  - The rest as with hypervisor 5: `nc_run` 175.1 ms, `nc_run_mp` 66.3 ms, ASYNC 87.6 ms.
+- `hello TIME`: `nc_call(add)` 5.90 µs (5.4–6.5 before), `nc_run_mp` 12.6 µs, start + wait 15.3 µs: arming the
+  limit has no measurable cost.
+- The old library 1.5 on hypervisor 6: `LOOP=1000 FAULT MP ASYNC` with the same results.
+- A `gic400.library` was open on the test machine (other software reaching the GIC-400 from the 68k). Being
+  Non-secure, it cannot change the Group 0 setup; the self-test confirmed that.
+
+### 26.4 Log and fault details (hypervisor 7, library 1.6)
+
+- **Log:** a 16 KB ring in the hypervisor (`NC_LOG_SIZE`); positions count the bytes written since boot. Writers:
+  - native code: `nc_printf` / `nc_log` in the SDK runtime (`narm_rt.c`; `%d %i %u %x %X %p %s %c`, `-`/`0`/width,
+    `l`/`ll`/`z`). `TPIDR_EL2` → `hv_cpu` + `NC_CPU_ENV` (144) → `struct NCEnv` → `log_write` (hypervisor code,
+    called directly from native code). On hypervisor 5/6 that word is 0 and nothing is written. On the 68k side
+    the macros are empty.
+  - the hypervisor: a line for every fault and time-out, `nc: fault on core N, ESR …, FAR …, module … +offset`.
+  - `hv_log_write` copies the text to its stack first (a bad pointer faults before the lock is taken) and holds
+    the lock with FIQs masked (a time-out cannot interrupt it).
+- **`NC_OP_LOGREAD` (8), `NC_OP_FAULTINFO` (9).** `struct NCFaultInfo` (336 bytes, all 32 bit): status, core,
+  module, counter, ESR/FAR/ELR/SP, x0–x30, a backtrace of 10 steps as module offsets (ELR, LR, then frame records
+  while they are inside the stack, 8-aligned and ascending).
+- **Saving the registers:** at fault or FIQ entry no register and no native stack can be trusted. x5 goes to
+  `CNTHP_CVAL_EL2` first (a full 64-bit register, the time limit's own, switched off on every exit anyway), then
+  x0–x30 and SP go to `hv_cpu.regs` through `TPIDR_EL2`. (`VTTBR_EL2` was considered: its VMID field does not hold
+  64 bits.) `hv_cpu` is 768 bytes.
+- **SDK:** kernels are built with `-g -fno-omit-frame-pointer` (the `.narm` size does not change, the
+  information is in the `.elf`). `nc addr2line <module>.elf <offset>...` (modules are linked at 0: offset =
+  address; return addresses minus 4). Library: `NC_ReadLog` (−144), `NC_GetFaultInfo` (−150), through a buffer
+  above 16 MB (the caller's may be below). Tool `NCLog` (`FOLLOW`, `FAULT`). `hello LOG`, kernels `logtest` and
+  `deepfault` (df1 → df2 → df3).
+- **QEMU:** the backtrace `0x30 0x4c 0x6c 0xeb0` → `nc addr2line`: `df3 :167`, `df2 :172`, `df1 :179`,
+  `deepfault :192`. The A1200 gave the same four offsets.
+- **Lesson:** the QEMU `stub` scenario rebuilds the armstub with its own compiler. To test the binary that goes on
+  the card, copy it into `build-qemu-stub/` and `touch` it; if a source is newer, make rebuilds it. Always compare
+  the md5 afterwards.
+
+### 26.5 Memory protection (hypervisor 7)
+
+- The hypervisor's 2 MB are mapped with 4 KB pages (`l3_hv`): code read-only, page tables read-only (`.bss.pt`,
+  updated through the maintenance alias), the lowest page of every stack unmapped (guard). All other RAM in 2 MB
+  blocks.
+- On the first request `restrict_native_map()` removes from the identity map every 2 MB block of RAM that EL1
+  does not map 1:1: Emu68's kernel, JIT cache and MMU pool, GPU memory (`0x3AA00000`–`0x3FFFFFFF`), RAM above
+  4 GB. A1200 and QEMU raspi4b: 1928 MB visible, 102 MB hidden.
+- `hello PROTECT`: a write to code gives ESR `9600004f`, a read of Emu68's memory `96000006` (FAR `0x7fd00000`),
+  a stack overflow `96000047` (FAR in the guard page). All `0x84`, the machine goes on.
+- **`PiReboot`** (`sdk/tools/pireboot.c`): `PiReboot NOW` restarts the Pi with the BCM2711 watchdog, as Emu68's
+  `pi_reset()` does (`PM_RSTS` partition 0, `PM_WDOG` 10, `PM_RSTC` full reset; from the 68k at `$F2000000`). The
+  firmware reads the armstub again, so it replaces a power cycle. It needs no hypervisor and is of no use on a
+  frozen machine. The Pi is back after about 15 s; the hypervisor's log is gone.
+
+### 26.6 An instability that looked like hypervisor 7
+
+With hypervisor 7, `bench` in a loop reset the Amiga within about 20 rounds on most boots. The Pi stayed up (the
+hypervisor's log survived), there was no Guru. A day went into the hypervisor:
+
+| armstub | boots: clean / crashed |
+|---|---|
+| hypervisor 6 | 3 / 0 (160 + 100 + 100 rounds) |
+| hypervisor 6 padded to the size of 7 | 1 / 0 |
+| hypervisor 7 (with and without protection, diagnostics, stack painting, ...) | about 2 / 10 |
+| stage 2 for EL1 on all cores, hypervisor memory unmapped | 3 / 1, and no EL1 access was ever caught |
+
+- `bench` causes no fault or time-out; the hot paths (`hv_lower_sync`, `nc_call_native`, `hv_entry`) were the same
+  instruction for instruction as in hypervisor 6. `-fanalyzer` was clean.
+- Results changed from boot to boot. **One clean boot proves nothing; an experiment needs three or four.**
+- What turned it: Emu68's own log at the moment of the crash (`async_log` in `cmdline.txt`; the hypervisor
+  searched RAM for Emu68's log buffer after the reset and copied its end into its own log, `HV_EMU68LOG`). The last
+  lines were `[GIC] gic_local_disable()`, `[PS] CPU sending RESET`: no exception, no JIT error. **The 68k
+  executed a RESET instruction**, so 68k memory or state was being corrupted.
+
+### 26.7 The cause: modules did not contain their `.bss`
+
+**The bug was in the SDK's `native/narm.ld`, not in the hypervisor**, since `--gc-sections` was added (releases
+1.5.0 and 1.6.0 have it):
+
+- With `.data : { *(.data*) *(.bss*) *(COMMON) }`, once only `.bss` input is left in the output section it becomes
+  NOBITS, and `objcopy -O binary` leaves it out of the image. `bench.narm` was 1248 bytes (`0x4e0`), but
+  `crc_table_ready` was at `0x4e0` and `crc_table` at `0x4f0`–`0x8f0`: **outside the image**. The library allocated
+  the image size + 4095 and aligned to 4 KB; when less than 1040 bytes of that slack were left, the native
+  `crc32_table` kernel wrote past the allocation, into exec's free list.
+- Once the table was written its flag stayed 1 (RAM survives even a Pi reset); when that memory was reused and
+  cleared by someone else, the table was written again. Rare, and dependent on addresses and history: hence the
+  boot-to-boot differences, and hypervisor 6 looking clean (it had the same bug; luck).
+- **How it was found:** `HV_RESETSPY` (a stage-2 trap on the GICC page; when Emu68 writes there in
+  `gic_local_disable`, the hypervisor logs the 68k state). At the RESET: `D7 = 0x81000005` (`AN_MemCorrupt`), PC in
+  ROM, and on the user stack `0x27100` (160000, the size `bench` passes to `FreeMem`). Then `readelf`: `.data`
+  NOBITS, `__narm_end` beyond the file size.
+- **A/B on one boot:** the fixed `bench` ran 200 rounds clean, the old `bench` crashed again.
+
+**Fix:**
+- `narm.ld`: `QUAD(0)` at the end of `.data` (the section becomes PROGBITS, `.bss` is in the image as zeros),
+  `__narm_end` = end of the image. The linker's warning `section .data type changed to PROGBITS` is expected.
+- `mk/nativecall.mk`: the build fails if the image is smaller than `__narm_end`.
+- Library 1.6: 64 KB of cleared slack behind every module (`MODULE_SLACK`), so modules built with the old SDK are
+  safe with the new library if their `.bss` is at most 64 KB.
+- **Other projects:** every module built with the 1.5.0 or 1.6.0 SDK whose kernels have zero-initialised static
+  or global variables is affected and must be rebuilt.
+
+**Lesson:** for a rare crash, first find out what the 68k says at the moment it dies. The diagnostic code is still
+in the source, switched off: `make HV_EXTRA="-DHV_DIAG -DHV_CANARY -DHV_RESETSPY -DHV_EMU68LOG -DHV_S2"`.
+
+After the fix, over two boots on the A1200: `hello LOOP=1000 FAULT MP ASYNC TIMEOUT LOG PROTECT HEAP TIME` (GCC,
+VBCC), the full test set 20 times, `bench` 200 + 150 rounds, `mandeldemo`. All clean.
+
+### 26.8 Job cancel and cleaning up at exit
+
+A job started with `nc_start_mp` kept running on the helpers when the program exited without `nc_wait`, writing
+to freed memory, and its slot (one of four) stayed taken for good.
+
+- **Hypervisor 7: `NC_OP_CANCEL` (10)**, arg0 = job. `JOB_CANCELLED` (0x100) is CASed into `hv_job.fault`; the
+  existing path "after a fault, pieces are only counted" skips the remaining pieces, and core 0 counts them all at
+  once. Running pieces finish (at most the time limit). `WAIT` → `NC_ST_CANCELLED` (0x88), result = the sum of the
+  pieces that ran. No fault is recorded. An unknown job gives `0x86`.
+- **Library 1.6:** `NC_CancelJob` (−156). `NC_UnloadModule` and expunge cancel jobs instead of waiting for them.
+  `reap_jobs` cancels the jobs of tasks that are gone (a Workbench program, a crash) in `NC_StartMP` and
+  `LibOpen`. On a hypervisor without cancel (`NC_ST_BADOP`) it falls back to waiting.
+- **SDK:** `nc_cancel(k, &job)`. `ncsupport.c` registers an `atexit` handler on the first `nc_open`: if the
+  program exits without `nc_close`, its kernel sets are closed (jobs cancelled, modules unloaded). The reason: CLI
+  programs run in the Shell's task, so the library cannot tell from the task that the program ended. Programs
+  without a C runtime: `-DNC_NO_ATEXIT`.
+- **A1200:** `hello CANCEL`: an 87 ms job cancelled after 10 ms gives `0x88`, 2048 of 16384 units, and the cancel
+  takes 1.0–1.5 ms. `nc_close` with a running job returns after 11 ms. `hello LEAK` six times (starts a job and
+  exits without `nc_wait` or `nc_close`), then `hello ASYNC CANCEL`: all right, modules unloaded at exit.
+- **Testing lesson:** if an old library with the same version number is still in memory, `OpenLibrary(path)`
+  returns it, and calling a new LVO crashes the machine. `Avail FLUSH` or a restart before testing a new library.
+
+## 27. Why `ncdemo`'s 68k path had become slow: compiler flags and Emu68's JIT
+
+- **Symptom:** `ncdemo` built with GCC ran its 68k path at 24.8 fps; RESULTS.md had 44.6. The native path was
+  unchanged (164–169 fps).
+- **Not the hypervisor, library or environment:** the old 1.5.0 release binary gave 44.3 fps on the same boot.
+  The compiler had changed: the base image's tag moves, and this build had GCC 16.2.1b instead of 16.2.0b.
+- **Two things are expensive in Emu68's JIT:**
+  1. float → int: with `-m68040` the compiler does what a real 68040 needs: save FPCR, set round-to-zero, convert,
+     restore (about 85 ns per conversion). `FINTRZ` does not exist on the 68040 but does in Emu68, and is cheap.
+  2. loops closed with `DBF`: Emu68 ends its translation unit there.
+- **Fix (`sdk/mk/nativecall.mk`):** GCC `-O2 -m68040 -mtune=68060 -mhard-float -fno-branch-count-reg`, VBCC
+  `-cpu=68040 -fpu=68060`. On a real 68040, 68040.library emulates `FINTRZ` (slow but right). Measurements:
+  RESULTS.md, "68k compiler flags".
+- **After it:** `ncdemo` GCC 68k 49.0 ↔ native 164.2 fps (3.4x), VBCC 68k 40.5 ↔ native 164.4 fps. `mandeldemo`
+  did not change (double arithmetic, no conversions). `hello`, `bench`, `cputest`: same 68k times as before.
+- **Lessons:** the "native is N times faster" ratio depends on the 68k build (6.7x → 3.4x from flags alone).
+  Projects with their own 68k build can gain from the same flags. The compiler version should be pinned in the
+  image (open).
+
+## 28. Status: hypervisor 8, library 1.7, `NCStatus`
+
+Users asked: is NativeCall active, how loaded are the cores, how hot is the Pi, which programs are calling?
+
+- **Hypervisor 8:** per core in `hv_cpu`, `busy` (counter ticks spent in native code) and `calls`, added up in
+  `do_call` and `run_pieces`. New request `NC_OP_STATS` (11) → `struct NCStats` (104 bytes): counter, frequency,
+  temperature, jobs, faults, log position, 4 × `NCCoreStats` (busy, calls, `NC_CORE_NATIVE/HELPER`), hypervisor
+  version, `NC_FEAT_*`.
+- **Temperature:** the BCM2711's AVS monitor (`0xfd5d2200`, the formula of Linux's `bcm2711_thermal`:
+  410.04 − 0.487 · value). It is read under `nc_call_native`, so a fault is caught: on a machine without the
+  register the answer is "unknown" (0). QEMU: 0. A1200: 69.1 °C while `ENV:Emu68/Temperature` said 70.1.
+- **Library 1.7:** `NC_GetStats` (−162), `NC_ListModules` (−168, `struct NCModuleInfo`: owner's name, kernels,
+  calls, ARM time, jobs, faults, time limit). The owner's name (CLI command name or task name) is stored when the
+  module is loaded.
+- **`NCStatus`** (`sdk/tools/ncstatus.c`, GCC, MUI 3.8+): a state line, gauges for the four cores and the
+  temperature, the list of programs (calls per second, share of ARM time), the hypervisor's log, "Show last
+  fault". Says so if the library or hypervisor is missing; with an older hypervisor or library it takes the
+  temperature from `ENV:`. Icon: `sdk/tools/mkicon.py` draws it (46x46, 32-colour GlowIcon, a selected image with
+  a glow, and a 4-colour classic image).
+- **`NCLog STATS`** (NCLog 1.1): the same in the Shell, from a one-second sample.
+- **A1200:** during `mandeldemo` NEON MP, `NCLog STATS` shows three cores at 78–79% and 14 700 calls per second
+  each; in the one-core phase core 0 is at 93%.
+- **An expensive lesson (the A1200 rebooted):** the inline `MUI_NewObject(cl, Tag tags, ...)` in the MUI SDK's GCC
+  header passes `&tags` as the tag list. When GCC 16 inlines the function, the other tags are not behind that
+  address: broken objects, a crashed machine. Fix: `NO_INLINE_STDARG` and an own `MUI_NewObject` that copies the
+  tags with `va_arg`. Also: libnix `printf` reads `%u` as 16 bit; use `%lu` with a cast.
+
+## 29. New demos, `ncdemo` on all cores, a shared demo skeleton
+
+- **Skeleton** (`sdk/examples/common/`): `demofw.c/.h` (screen, the modes 68k / native / native MP, keys, timing,
+  summary; included at the end of a demo's `main.c`), `demopix.h` (pixel formats: kernels compute 0x00RRGGBB,
+  `demo_store`/`demo_pack`/`demo_put` write in the screen's format), `cgx.h`, `bigstack.c`.
+  - Screen: a 16-bit RTG mode first, then 32-bit, then 256 colours (a 3-3-2 palette, also without RTG). The RTG
+    mode's pixel format is asked before the screen is opened (`GetCyberIDAttr`).
+  - Arguments `WIDTH HEIGHT SECONDS AUTO MODE`; keys 1-3, N, Esc.
+- **Demos:** `raydemo` (6 spheres, shadows, 3 bounces), `voxeldemo` (a ray per column over a height map that a
+  kernel generates at start), `nbodydemo` (1500 bodies, all pairs, two buffers so that pieces only read the old
+  state), `filterdemo` (bilinear rotate and scale, then a 3x3 filter: two kernels in a row), `mp3demo` (minimp3;
+  plays through AHI with `nc_start_mp` decoding on an idle core; `BENCH` compares decoders). Figures: RESULTS.md.
+  - `ncdemo` now has the three modes too. Its gain from several cores is small (raster 3.5 → 2.9 ms): every
+    piece walks all triangles, and the rest of the frame is the copy to the screen.
+- **Expensive lessons:**
+  1. **The 68k version of a kernel runs on the caller's stack.** A Shell gives 4 KB; libnix `printf` + graphics +
+     a kernel can exceed that, and minimp3 alone wants 16 KB. `bigstack.c` runs the demo's body in a child
+     process with a 64 KB stack (`CreateNewProc`) and passes Ctrl-C on to it. Do not rely on the compilers'
+     `__stack` variable: with VBCC memory was corrupted in tests (the exact cause was not isolated).
+  2. **VBCC 0.9h and minimp3:** `-O2` ends in an internal compiler error, `-O1` produces 68k code that decodes
+     wrong samples (`BENCH` showed it), `-O0` is right. `mp3demo/Makefile` sets `OPT68 := -O0` for VBCC (`OPT68`
+     is new in the mk).
+  3. **minimp3's NEON code is wrong on big-endian AArch64:** `MINIMP3_NO_SIMD`.
+  4. **An emulator is not a stability test.** The WinUAE setup used here rebooted at random when demos ran one
+     after another, known-good ones included; hours went into bugs that did not exist. Use it to see whether a
+     program opens and draws correctly, and test stability on the real machine.
+
 ## Known limitations and open work
 
 - Only the 8 GB Pi 4 has been tested on hardware. Hypervisor 5 handles other sizes (section 25), tested in
-  QEMU only.
+  QEMU only. No armstub for the Pi 3 or Zero 2 W.
 - All hardware results come from one machine.
-- An endless loop in a kernel locks the machine (core 0) or that helper.
-- There is no stack guard (64 KB per core).
-- If a program crashes during an asynchronous job, a helper may write to freed memory.
-- `ncdemo` does not use `nc_run_mp` yet.
+- After a time-out or a fault the module's state is unknown (half-written output, a held lock).
+- The time limit needs the GIC variant of the armstub.
+- The compiler versions in the SDK image are not pinned (section 27).
+- `nc test` (a helper that compares 68k and native results), calling a kernel by name, and choosing 68k or
+  native by measurement are ideas from a game port's report that are not done.

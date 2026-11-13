@@ -7,6 +7,9 @@
 #   nc sdk                  build the SDK itself: headers + build/nativecall.library
 #   nc image                build the Docker image (once; also after SDK updates)
 #   nc shell                interactive shell in the build container, project mounted
+#   nc addr2line <module.elf> <offset>...
+#                           file:line of module offsets, e.g. NCFaultInfo.backtrace[] (hypervisor 7):
+#                           the first is where it happened, the others return addresses
 #
 # The image is nativecall-sdk:1 (sdk/docker/Dockerfile). Results land in the project's
 # build/<compiler>/ directory: the program and its .narm module.
@@ -75,8 +78,25 @@ case "$1" in
         need_image
         run bash
         ;;
+    addr2line)
+        elf=$2
+        shift 2 || true
+        [ -f "$elf" ] && [ $# -gt 0 ] || { echo "usage: nc addr2line <module.elf> <offset>..." >&2; exit 1; }
+        need_image
+        # modules are linked at 0: an offset is the address in the .elf. Return addresses point
+        # after the call: look up the call itself (offset - 4), except for the first one.
+        addrs=""
+        first=1
+        for o in "$@"; do
+            o=${o#0x}
+            [ "$o" = ffffffff ] && continue
+            if [ $first = 1 ]; then a=$((16#$o)); first=0; else a=$((16#$o - 4)); fi
+            addrs="$addrs $(printf '0x%x' $a)"
+        done
+        run aarch64-linux-gnu-addr2line -e "$elf" -f -i -p -C $addrs
+        ;;
     *)
-        sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
         exit 1
         ;;
 esac

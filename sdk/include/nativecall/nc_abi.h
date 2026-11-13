@@ -63,11 +63,21 @@ struct NCBlock
 #define NC_OP_RUNMP     5   /* hypervisor 3+: like CALL, over a range on several cores, below */
 #define NC_OP_START     6   /* hypervisor 4+: RUNMP without waiting (asynchronous job), below */
 #define NC_OP_WAIT      7   /* hypervisor 4+: result of a START job */
+#define NC_OP_LOGREAD   8   /* hypervisor 7+: copy from the log, below */
+#define NC_OP_FAULTINFO 9   /* hypervisor 7+: details of the last native fault, below */
+#define NC_OP_STATS     11  /* hypervisor 8+: statistics for a monitor, below */
+#define NC_OP_CANCEL    10  /* hypervisor 7+: arg0 = job number of a START job: the pieces not
+                               started yet are skipped (core 0 counts them off at once); pieces
+                               that run right now finish (at most the time limit). Then ask WAIT
+                               as usual: it answers NC_ST_CANCELLED with the sum of the pieces
+                               that did run, or the job's own result if it was complete already.
+                               NC_ST_BADJOB: no such job; NC_ST_BADOP: hypervisor without it. */
 
 #define NC_PING_REPLY   NC_FOURCC('N','A','R','M')
-#define NC_HV_VERSION   5   /* 2: CALL replies carry the native run time, 3: NC_OP_RUNMP,
+#define NC_HV_VERSION   8   /* 2: CALL replies carry the native run time, 3: NC_OP_RUNMP,
                                4: NC_OP_START / NC_OP_WAIT, 5: placed from the device tree
-                               (no change for the 68k) */
+                               (no change for the 68k), 6: time limit (NC_ST_TIMEOUT),
+                               7: log (nc_printf, NC_OP_LOGREAD), NC_OP_FAULTINFO, 8: NC_OP_STATS */
 
 /* Status */
 #define NC_ST_NONE      0x00    /* nobody processed the block: no hypervisor */
@@ -80,6 +90,12 @@ struct NCBlock
 #define NC_ST_FAULT     0x84    /* native code crashed: info[0..1] = ESR, info[2..3] = FAR, info[4..5] = ELR */
 #define NC_ST_BUSY      0x85    /* NC_OP_START: all job slots are taken */
 #define NC_ST_BADJOB    0x86    /* NC_OP_WAIT: no such job */
+#define NC_ST_TIMEOUT   0x87    /* hypervisor 6+: native code ran past its time limit and was
+                                   stopped; info[] as NC_ST_FAULT with ESR = 0, FAR = 0 and
+                                   ELR = where it was. Its output is incomplete, and a lock it
+                                   held stays taken. */
+#define NC_ST_CANCELLED 0x88    /* NC_OP_WAIT: the job was cancelled (NC_OP_CANCEL); result = sum of
+                                   the pieces that ran, its output is incomplete */
 
 /* Set by the 68k library only (no request was made) */
 #define NC_ST_NOCPU     0xf0    /* not a 68040/68060: CPUSHL not tried */
@@ -92,6 +108,13 @@ struct NCBlock
    a faulting one. Hypervisor 1 leaves these alone: the library clears them before a call. */
 #define NC_CALLINFO_TICKS   6   /* ARM counter ticks (CNTPCT_EL0) the function ran */
 #define NC_CALLINFO_FREQ    7   /* counter frequency in Hz (54 MHz on a Pi 4), 0: not measured */
+
+/* Time limit (hypervisor 6+), input of NC_OP_CALL, NC_OP_RUNMP and NC_OP_START: info[5] =
+   microseconds one native call may run (for RUNMP / START: one piece), 0 = NC_TIMEOUT_DEFAULT_US.
+   Past it the EL2 timer stops the native code, the request ends with NC_ST_TIMEOUT. Without it an
+   endless loop on core 0 hangs the whole machine. Older hypervisors ignore info[5]. */
+#define NC_CALLINFO_TIMEOUT 5
+#define NC_TIMEOUT_DEFAULT_US   1000000     /* 1 s */
 
 /* NC_OP_RUNMP (hypervisor 3+): run a kernel over [from, to) on core 0 and the ARM cores
    Emu68 leaves idle (cores 1 and 3 on a PiStorm; NOTES.md 22). Like NC_OP_CALL: arg0 =
@@ -140,10 +163,119 @@ struct NCJobStatus
 };
 
 /* NC_OP_PING (hypervisor 3+): info[0] = helper cores ready for NC_OP_RUNMP (bit n = core n),
-   info[1..3] = RUNMP pieces run by cores 1-3, info[4..6] = idle "wfe" of cores 1-3 taken */
+   info[1..3] = RUNMP pieces run by cores 1-3, info[4..6] = idle "wfe" of cores 1-3 taken,
+   info[7] (hypervisor 6+) = NC_FEAT_* that work right now */
 #define NC_PINGINFO_HELPERS 0
 #define NC_PINGINFO_PIECES  1
 #define NC_PINGINFO_WFE     4
+#define NC_PINGINFO_FEATURES 7
+
+/* The time limit works: tested on every PING (a 50 us limit on hypervisor code must stop it).
+   Missing when the firmware's interrupt setup is not the one the armstub expects (enable_gic=0,
+   another armstub stage); then native code runs without a limit, as before hypervisor 6. */
+#define NC_FEAT_TIMEOUT     0x1
+
+/* ---- Log (hypervisor 7+) ----------------------------------------------------------------------
+
+   A ring of NC_LOG_SIZE bytes in the hypervisor: text from native code (nc_printf / nc_log in
+   kernel.h) and the hypervisor's own lines (every fault and time-out). Positions count bytes
+   written since the Pi started.
+
+   NC_OP_LOGREAD: arg0 = 68k buffer, arg1 = its size, arg2 = position to read from (0 at first).
+   result = bytes copied; info[0] = position after them (pass it next time), info[1] = bytes that
+   were overwritten before they could be read (the reader was too slow or started late). */
+#define NC_LOG_SIZE         16384
+#define NC_LOGINFO_POS      0
+#define NC_LOGINFO_LOST     1
+
+/* ---- Fault details (hypervisor 7+) ------------------------------------------------------------
+
+   NC_OP_FAULTINFO: arg0 = 68k address of a struct NCFaultInfo, arg1 = its size. Copies the last
+   fault or time-out of native code (any core). status 0: none since the Pi started.
+
+   backtrace[]: [0] = where it happened (ELR), [1] = the link register, then the return addresses
+   of the frame pointer chain (kernels built by the SDK keep frame pointers), as offsets in the
+   module's image, NC_FAULT_NOOFFSET outside it. "nc addr2line <module>.elf <offsets>" turns
+   them into file:line. */
+#define NC_FAULT_FRAMES     10
+#define NC_FAULT_NOOFFSET   0xffffffffUL
+
+struct NCFaultInfo
+{
+    nc_u32 version;         /* 1 */
+    nc_u32 status;          /* NC_ST_FAULT, NC_ST_TIMEOUT, 0 = no fault yet */
+    nc_u32 core;            /* ARM core that faulted */
+    nc_u32 module;          /* 68k address of the module, 0 if unknown */
+    nc_u32 count;           /* faults and time-outs since the Pi started */
+    nc_u32 esr;             /* ESR_EL2 (0 for a time-out) */
+    nc_u32 far_hi, far_lo;  /* FAR_EL2: the address that faulted */
+    nc_u32 elr_hi, elr_lo;  /* ELR_EL2: the instruction */
+    nc_u32 sp_hi, sp_lo;
+    nc_u32 x[31][2];        /* x0..x30, high and low word */
+    nc_u32 backtrace[NC_FAULT_FRAMES];
+};
+
+
+/* ---- Statistics (hypervisor 8+) ---------------------------------------------------------------
+
+   NC_OP_STATS: arg0 = 68k address of a struct NCStats, arg1 = its size. A monitor reads it now
+   and then and shows the differences: busy ticks of a core / ticks passed = the share of its
+   time that core ran native code. */
+struct NCCoreStats
+{
+    nc_u32 busy_hi, busy_lo;    /* counter ticks this core ran native code since the Pi started */
+    nc_u32 calls;               /* native calls and pieces it ran */
+    nc_u32 flags;               /* NC_CORE_* */
+};
+
+#define NC_CORE_NATIVE      0x1 /* runs native code: core 0, and the helper cores captured */
+#define NC_CORE_HELPER      0x2 /* a helper core (idle core of Emu68 that takes pieces) */
+
+struct NCStats
+{
+    nc_u32 version;             /* 1 */
+    nc_u32 freq;                /* counter ticks per second */
+    nc_u32 now_hi, now_lo;      /* the counter now */
+    nc_u32 temperature;         /* SoC temperature in 1/1000 degrees C, 0 = not known */
+    nc_u32 jobs;                /* asynchronous jobs in the hypervisor right now */
+    nc_u32 faults;              /* native faults and time-outs since the Pi started */
+    nc_u32 log_pos;             /* bytes written to the log since the Pi started */
+    struct NCCoreStats core[4];
+    nc_u32 hv_version;          /* NC_HV_VERSION of the hypervisor */
+    nc_u32 features;            /* NC_FEAT_* that work right now */
+};
+
+/* NC_ListModules() (library 1.7): one loaded module */
+struct NCModuleInfo
+{
+    nc_u32 module;              /* its handle (address) */
+    nc_u32 size;                /* image size in bytes */
+    nc_u32 kernels;             /* entries */
+    nc_u32 calls;               /* requests made for it (calls, runs' pieces, jobs started) */
+    nc_u32 total_us;            /* native time of those the hypervisor measured (wraps) */
+    nc_u32 jobs;                /* its asynchronous jobs running now */
+    nc_u32 timeout_us;          /* its time limit, 0 = default */
+    nc_u32 faults;              /* requests that ended in a fault or time-out */
+    char   owner[32];           /* program that loaded it (task or CLI command name) */
+};
+/* ---- Native environment (hypervisor 7+) -------------------------------------------------------
+
+   While native code runs, TPIDR_EL2 points at the hypervisor's state of that core, and at offset
+   NC_CPU_ENV of it is a pointer to this (0 before hypervisor 7). Used by the SDK's runtime
+   (nc_printf), not by kernels directly. */
+#define NC_CPU_ENV          144
+#define NC_ENV_MAGIC        NC_FOURCC('N','E','N','V')
+
+#if defined(__aarch64__)
+struct NCEnv
+{
+    uint32_t magic;         /* NC_ENV_MAGIC */
+    uint32_t version;       /* NC_HV_VERSION */
+    uint32_t core;
+    uint32_t reserved;
+    void (*log_write)(const char *text, uint32_t len);  /* hypervisor code, any core */
+};
+#endif
 
 /* NC_GetKernelStats() (library 1.2): native run time of one kernel entry, microseconds.
    Only with hypervisor 2+ (otherwise all 0). */

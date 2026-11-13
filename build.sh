@@ -8,6 +8,8 @@
 # Result in dist/:
 #   nativecall-armstub.bin          -> SD card (INSTALL.md)
 #   Libs/nativecall.library         -> LIBS:
+#   C/NCLog, C/PiReboot             -> C: (hypervisor log, last fault, statistics; restart the Pi)
+#   Tools/NCStatus (+ .info)        -> anywhere (MUI window: state of nativecall, load of the ARM cores)
 #   vbcc/, gcc/                     -> example programs with their .narm modules
 
 set -e
@@ -19,7 +21,7 @@ TARGET=${1:-all}
 if command -v cygpath >/dev/null; then HERE=$(cygpath -m "$PWD"); else HERE=$PWD; fi
 run() { docker run --rm -v "$HERE:/w" -w /w -e NC_SDK=/w/sdk "$IMAGE" sh -c "$1"; }
 
-EXAMPLES="hello bench cputest ncdemo mandeldemo"
+EXAMPLES="hello bench cputest ncdemo mandeldemo raydemo voxeldemo nbodydemo filterdemo mp3demo"
 
 run "make -C hypervisor $TARGET && make -C sdk $TARGET"
 for ex in $EXAMPLES; do
@@ -31,9 +33,12 @@ for ex in $EXAMPLES; do
 done
 
 if [ "$TARGET" = all ]; then
-    rm -rf dist && mkdir -p dist/Libs dist/vbcc dist/gcc
+    rm -rf dist && mkdir -p dist/Libs dist/C dist/vbcc dist/gcc
     cp hypervisor/build/nativecall-armstub.bin dist/
     cp sdk/build/nativecall.library dist/Libs/
+    cp sdk/build/NCLog sdk/build/PiReboot dist/C/
+    mkdir -p dist/Tools
+    cp sdk/build/NCStatus sdk/build/NCStatus.info dist/Tools/
     for ex in $EXAMPLES; do
         for cc in vbcc gcc; do
             cp sdk/examples/$ex/build/$cc/$ex sdk/examples/$ex/build/$cc/$ex.narm dist/$cc/

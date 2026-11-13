@@ -78,6 +78,31 @@ BOOL NC_JobDone(ULONG job);
 /* 1.5: wait for the job, return the sum of its results; status may be NULL */
 ULONG NC_WaitJob(ULONG job, ULONG * status);
 
+/* 1.6: time limit of one native call (one piece) of this module's kernels in microseconds, */
+/* 0 = the hypervisor's default (1 s). Past it: NC_ST_TIMEOUT (hypervisor 6+). Returns the old value, */
+/* or 0xFFFFFFFF if this machine has no working time limit. */
+ULONG NC_SetTimeout(APTR module, ULONG microseconds);
+
+/* 1.6: read the hypervisor's log (nc_printf of kernels, faults, time-outs; hypervisor 7+) from */
+/* *position on (0 at first); returns the bytes copied and moves *position past them */
+ULONG NC_ReadLog(APTR buffer, ULONG size, ULONG * position);
+
+/* 1.6: details of the last native fault or time-out (registers, backtrace); FALSE if none */
+BOOL NC_GetFaultInfo(struct NCFaultInfo * info);
+
+/* 1.6: stop a job (hypervisor 7+): pieces not started are skipped, running ones end, then as */
+/* NC_WaitJob; status NC_ST_CANCELLED. Jobs of a module are cancelled when it is unloaded, jobs */
+/* of tasks that are gone when the next job starts. */
+ULONG NC_CancelJob(ULONG job, ULONG * status);
+
+/* 1.7: statistics of the hypervisor (8+) for a monitor: native time of each ARM core, SoC */
+/* temperature, jobs, faults. FALSE without them. */
+BOOL NC_GetStats(struct NCStats * stats);
+
+/* 1.7: the modules loaded right now (who loaded them, calls, native time), at most max; returns */
+/* how many there are in all */
+ULONG NC_ListModules(struct NCModuleInfo * info, ULONG max);
+
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */

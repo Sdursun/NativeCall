@@ -15,15 +15,42 @@ For a guided explanation, see **[docs/NativeCall.pdf](docs/NativeCall.pdf)**.
 |---|---:|---:|---:|
 | CRC32, 4 MB (hardware instruction) | 52.11 ms | 2.38 ms | 21.9x |
 | 4x4 matrix × 10 000 vertices (NEON) | 1.01 ms | 0.11 ms | 9.2x |
+| Ray tracing (`raydemo`, 3 cores) | 1.9 fps | 33.6 fps | 18.4x |
+| Rotate, scale and 3x3 filter (`filterdemo`, 3 cores) | 9.7 fps | 125.3 fps | 15.5x |
+| 1500-body gravity (`nbodydemo`, 3 cores) | 6.0 fps | 61.0 fps | 10.9x |
 | Mandelbrot zoom (NEON, 3 cores) | 3.2 fps | 27.1 fps | 8.8x in iterations/s |
-| Software 3D torus (1 core) | 44.6 fps | 169.3 fps | 3.8x |
+| MP3 decoding (`mp3demo`, 1 core) | 27.8x real time | 198x real time | 7.1x |
+| Voxel landscape (`voxeldemo`, 3 cores) | 40.7 fps | 198.3 fps | 6.0x |
+| Software 3D torus (`ncdemo`, 3 cores) | 50.4 fps | 204.6 fps | 4.1x |
 | GPU-limited demo (Boing Ocean) | 55.3 fps | 55.8 fps | +0.9% |
 
-Full measurements: [RESULTS.md](RESULTS.md).
+The gains of the graphics demos compare the time to compute a frame, without the copy to the screen. Full
+measurements: [RESULTS.md](RESULTS.md).
 
 ## Status
 
-Version **1.6.0**: `nativecall.library` 1.5, hypervisor 5.
+Version **1.7.0**: `nativecall.library` 1.7, hypervisor 8. New since 1.6.0:
+
+- **Time limit:** a kernel that runs too long (1 s by default, `nc_set_timeout`) is stopped and the call returns
+  `NC_ST_TIMEOUT`. An endless loop no longer locks the machine.
+- **Memory protection:** native code sees only the RAM the 68k sees. The hypervisor's code and page tables are
+  read-only, Emu68's private memory is hidden, and every stack has a guard page.
+- **Log and fault details:** `nc_printf` in kernels, the `NCLog` tool, registers and a backtrace of the last fault,
+  `nc addr2line` to turn it into source lines.
+- **Job cancel:** `nc_cancel`; jobs of a program that exits or crashes are cancelled instead of writing to freed
+  memory.
+- **Status:** `NCStatus` (a MUI window) and `NCLog STATS` show whether NativeCall is active, how much of each ARM
+  core's time goes to native code, the temperature, and which programs have native modules loaded.
+- **Five new demos** (ray tracing, voxel landscape, n-body, image filter, MP3 player), and `ncdemo` on all cores.
+- **A fix you need:** modules built with the 1.5.0 or 1.6.0 SDK did not contain their `.bss`. A kernel with
+  zero-initialised static or global variables wrote past its module and could corrupt memory. **Rebuild such
+  modules with this SDK** (NOTES.md 26.7). Library 1.6 and newer also keep 64 KB of slack behind a module, which
+  protects old modules whose `.bss` is smaller than that.
+- **Faster 68k fallback:** new default compiler flags for the 68k side; `ncdemo`'s 68k path went from 24.8 to
+  49 fps with the same compiler (NOTES.md 27).
+
+![NCStatus on the A1200 while mandeldemo runs on three cores](docs/images/ncstatus.png)
+
 
 - **Hardware: Raspberry Pi 4.** Hypervisor 5 finds its place in the device tree (the top 2 MB of RAM, taken
   from Emu68's view), so it no longer depends on the 8 GB model. If the layout is not the expected one, the
@@ -31,6 +58,7 @@ Version **1.6.0**: `nativecall.library` 1.5, hypervisor 5.
   See [INSTALL.md](INSTALL.md).
 - Tested on one machine: A1200, PiStorm32-lite, Pi 4 8 GB, Emu68 `1.1.0-beta.1 git:0ba3a89`, AmigaOS 3.2. The 1,
   2 and 4 GB layouts are tested in QEMU only (NOTES.md 25).
+- Library and hypervisor versions work with each other in any combination; missing features fall back.
 
 ## How it works
 
@@ -62,8 +90,9 @@ Version **1.6.0**: `nativecall.library` 1.5, hypervisor 5.
 3. **Why a doorbell.** All other `dc civac` operations (DMA buffers, Emu68's own flushes) are redone on the
    physical address and otherwise ignored. Only with the D0/D1 values does the hypervisor look at memory, so data
    that happens to contain the magic word can never be taken for a request.
-4. **Native code.** The kernel runs at EL2 with Emu68's FP/SIMD state saved. Its own memory map leaves out the
-   low 16 MB (chip RAM, hardware), so a bad pointer ends in `NC_ST_FAULT`, not a crash. Emu68 runs AArch64
+4. **Native code.** The kernel runs at EL2 with Emu68's FP/SIMD state saved. Its own memory map holds only the RAM
+   the 68k sees above 16 MB: no chip RAM or hardware, none of Emu68's private memory, the hypervisor's code
+   read-only. A bad pointer or a stack overflow ends in `NC_ST_FAULT`, not a crash. Emu68 runs AArch64
    big-endian, so kernels are built `-mbig-endian` and 68k data needs no conversion.
 5. **Keeping the 68k alive.** During a call on core 0, 68k interrupts wait. `nc_run` cuts big jobs into pieces of
    about 0.5 ms and learns the right size per kernel, so sound and input keep running between pieces.
@@ -71,7 +100,12 @@ Version **1.6.0**: `nativecall.library` 1.5, hypervisor 5.
    `MDCR_EL2.TPM`; Emu68's first PMU access traps, and it then turns on `HCR_EL2.TWE`. From there each idle `wfe`
    lands in the hypervisor, which hands out pieces of work. Core 2 (the PiStorm housekeeper) is left alone.
 7. **Asynchronous jobs.** `nc_start_mp` gives a job to the helper cores and returns: the 68k and its interrupts
-   keep running. `nc_wait` collects the result.
+   keep running. `nc_wait` collects the result, `nc_cancel` stops the job.
+8. **Time limit.** Before native code starts, the hypervisor arms the EL2 timer (`CNTHP`). The armstub routes that
+   interrupt as a Group 0 FIQ in the GIC, which Emu68 does not use and, running non-secure, cannot change. When
+   it fires, the call ends like a fault, with `NC_ST_TIMEOUT`.
+9. **Log and statistics.** The hypervisor keeps a 16 KB ring of text (kernels' `nc_printf`, a line per fault and
+   time-out), the registers and backtrace of the last fault, and per core the time spent in native code.
 
 Details and the Emu68 source references: [NOTES.md](NOTES.md).
 
@@ -141,8 +175,9 @@ On Windows, clone with `core.autocrlf=false`; CRLF line endings break the Linux 
 | `stubrefuse` | raspi4b | the real armstub, initrd at the top of RAM: refused, Emu68 boots without it |
 | `fdt` | PC | the device tree parser alone: 16 layouts (1, 2, 4, 8 GB, `total_mem`, bad trees) |
 
-`raspi4b` is QEMU 9.2 with three small patches (`tools/qemu/qemu9-patch.py`): `wfe` traps, RAM as one node with
-two blocks and 32-bit initrd values, as the Pi firmware writes them. Stock Emu68 then reports the same RAM limits
+`raspi4b` is QEMU 9.2 with four small patches (`tools/qemu/qemu9-patch.py`): `wfe` traps, RAM as one node with
+two blocks, 32-bit initrd values as the Pi firmware writes them, and a GIC with Security Extensions as the
+BCM2711's GIC-400 has (the time limit needs them). Stock Emu68 then reports the same RAM limits
 as on the A1200.
 
 Tests of the 68k program:
@@ -163,11 +198,18 @@ Tests of the 68k program:
 | `ASTART` / `AWAIT` | asynchronous job | 68k loops during it; only cores 1 and 3 work; result right |
 | `ABUSY` | a fifth job with all slots taken | status `0x85` |
 | `AWAIT4` / `AFAULT` / `ABADJOB` | waiting for four jobs; a fault; an unknown job | right result; `0x84`; `0x86` |
+| `TIMEOUT` / `TMORUNMP` / `TMOASYNC` | an endless kernel as a call, a shared job, an asynchronous job (`stub` only) | status `0x87`; calls and jobs work afterwards |
+| `LOGCALL` | `nc_printf` from a kernel | the formatted line is in the log |
+| `DEEPFLT` / `FINFO` | a fault three calls deep, then its details | `0x84`; FAR, x0, a backtrace of four addresses in the module |
+| `PROTECT0`-`2` | writing to hypervisor code, reading Emu68's memory, overflowing the stack | `0x84` each time; calls work afterwards |
+| `ACANCEL` / `ACWAIT` / `ACBADJOB` | cancelling a running job; an unknown job | accepted; `0x88`, not all units ran; `0x86` |
+| `STATS` | statistics | counter frequency; core 0 and a helper counted native time and calls |
 
 `qemu/run.sh base` runs the same program without the hypervisor: every request must come back with status 0.
 
 QEMU's vCPUs take turns here rather than running in parallel, so this verifies the protocol, not the speed. It
-does not cover the real Pi 4 firmware, the GIC, or caches.
+does not cover the real Pi 4 firmware or caches. The time limit runs only in the `stub` scenario, where the real
+armstub sets up the GIC; the other scenarios check that it is reported as absent.
 
 ### Real hardware: the example programs
 
@@ -179,10 +221,19 @@ does not cover the real Pi 4 firmware, the GIC, or caches.
 | `hello ASYNC` | the job runs on cores 1 and 3 while the 68k keeps running |
 | `hello HEAP` | the allocator gives the same result on the 68k and natively |
 | `hello TIME` | the cost of a call, the clock, and a job |
+| `hello TIMEOUT` | an endless kernel is stopped after its 20 ms limit (`0x87`) as a call, a shared job and an asynchronous job |
+| `hello LOG` | `nc_printf` reaches the log; a fault three calls deep gives a backtrace |
+| `hello PROTECT` | writes to hypervisor code, reads of Emu68's memory and a stack overflow are caught |
+| `hello CANCEL` / `hello LEAK` | a job is cancelled; a program that exits without `nc_wait` or `nc_close` is cleaned up |
 | `cputest` | primes and Mandelbrot: 68k, native, NEON, results compared |
 | `bench` | Adler32, CRC32, matrices; results checked against the 68k |
-| `ncdemo` | software 3D, `N` switches 68k ↔ native |
+| `ncdemo` | software 3D, keys `1`-`3`: 68k, native, native on all cores |
 | `mandeldemo` | Mandelbrot zoom, keys `1`-`4`: 68k, native, NEON, NEON on all cores |
+| `raydemo`, `voxeldemo`, `nbodydemo`, `filterdemo` | ray tracing, voxel landscape, n-body, image filter; keys `1`-`3` as above |
+| `mp3demo BENCH <file>` | MP3 decoding on the 68k and natively, samples compared |
+| `mp3demo <file>` | plays through AHI while an idle ARM core decodes |
+| `NCLog`, `NCLog FAULT`, `NCLog STATS` | the hypervisor's log, the last fault, load per core |
+| `NCStatus` | the same as a MUI window |
 
 Also tested during development:
 
@@ -191,21 +242,28 @@ Also tested during development:
 - **Soak:** 5 million native calls in the background during 5 × 16 MB of network copies; the md5 sums matched and
   Workbench kept responding.
 - **WinUAE (68060, no armstub):** with and without the library, both compilers fall back to the 68k with right
-  results.
+  results (release 1.5.0; not repeated for this release).
+- **Loops:** `bench` 350 times and the whole `hello` test set 20 times in a row, over two boots, after the `.bss`
+  fix (NOTES.md 26.7).
 
 **Exactly what ran on this release's binaries.** `./build.sh` reproduces the armstub and library byte for byte.
-With them on the A1200 (hypervisor 5), `hello LOOP=1000 FAULT MP ASYNC` (GCC and VBCC) and `bench` (GCC) passed,
-and all QEMU scenarios above passed on the source of this commit. `mandeldemo` from this build last ran with
-hypervisor 4, `cputest` with hypervisor 3. `ncdemo` was last run on hardware before modules gained `--gc-sections`.
+With them on the A1200 (hypervisor 8, library 1.7), all ten examples passed with GCC and with VBCC: `hello` with
+every test above, `bench`, `cputest`, `ncdemo`, `mandeldemo`, the four new graphics demos and `mp3demo BENCH`;
+`NCStatus` and `NCLog STATS` showed the load. All QEMU scenarios passed with the same armstub binary.
 
-**Not tested:** `async_log` / `ppc_enable` with several cores, a real Pi 4 with 1, 2 or 4 GB, and a machine other
-than the one above.
+**Not tested:** `async_log` / `ppc_enable` with several cores, a real Pi 4 with 1, 2 or 4 GB, a machine other
+than the one above, the new demos on a screen without RTG, and `NCStatus` with a MUI other than the one on the
+test machine.
 
 ## Limitations
 
 - During a call on core 0, 68k interrupts wait: keep calls near 1 ms or use `nc_run`.
-- An endless loop in a kernel locks the machine. There is no stack guard (64 KB per core).
-- Native code sees only Fast RAM above 16 MB, and makes no AmigaOS calls.
+- A kernel stopped by the time limit, or by a fault, may leave its output half written and a lock (such as the
+  `nc_heap` one) taken: reload the module or report the error.
+- The time limit needs the GIC (a stub built with `GIC=0` has none); `NCLog STATS` and `NCStatus` say whether it
+  works.
+- Native code sees only Fast RAM above 16 MB, and makes no AmigaOS calls. Its stack is 64 KB per core.
+- The 68k version of a kernel runs on the caller's stack, and a Shell gives 4 KB (sdk/README.md, "Debugging").
 - A plain C kernel gains about 2x, since Emu68's JIT is already good. The big gains need NEON, special instructions,
   several cores, or a batch instead of many small calls. GPU-limited programs gain little.
 - Three cores at full load heat a Pi 4 past 80 °C without cooling, and it slows down.
@@ -218,6 +276,7 @@ sdk/            SDK: library, headers, kernels support, tools, examples, templat
 qemu/           hypervisor test with unmodified Emu68
 tools/qemu/     Docker images for that test
 docs/           NativeCall.pdf and its HTML source
+dist/           after ./build.sh: armstub, Libs/, C/ (NCLog, PiReboot), Tools/ (NCStatus), examples
 INSTALL.md      installation and rollback
 RESULTS.md      measurements
 NOTES.md        technical notes, with Emu68 source references
@@ -231,5 +290,8 @@ Emu68 itself is not part of this repository: https://github.com/michalsc/Emu68
   the file).
 - Built with VBCC, vasm, vlink, GCC, and the Hyperion NDK 3.2; none of their sources are in this repository.
 - `tools/qemu/wfe-trap.py` patches QEMU's source when the test image is built; QEMU itself is not included.
+- `sdk/examples/mp3demo/minimp3.h` is minimp3 by lieff, https://github.com/lieff/minimp3 (CC0).
+- `NCStatus` uses MUI (Magic User Interface); its developer files come from the SDK's Docker image, not from
+  this repository.
 
 No license has been chosen yet for the rest of this project: all rights reserved by the author.

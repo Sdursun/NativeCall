@@ -35,7 +35,22 @@ NC_CHECK_SIZE(struct MarkParams, 16)
           call from a kernel must link without a GOT (see kernel.h)
    mark:  dst[i] = number of the ARM core that ran unit i, plus 1 (68k: 1); returns the
           number of units. Test of nc_run_mp: shows which cores did the work */
-#define HELLO_KERNELS(K) K(add) K(fault) K(copy) K(mark) K(heap)
+#define HELLO_KERNELS(K) K(add) K(fault) K(copy) K(mark) K(heap) K(spin) K(logtest) K(deepfault) K(protect)
+
+/* protect: memory protection of hypervisor 7, params->a = what to try (struct AddParams):
+              0 write a word of hypervisor code back unchanged (code is read-only)
+              1 read 1 MB below the hypervisor: private memory of Emu68 (not mapped any more)
+              2 overflow the stack (the lowest page of each stack is a guard)
+            Each must end with NC_ST_FAULT. Returns 0 if it was not stopped, 0xEEEE without
+            hypervisor 7 (nothing tried: 2 would really overwrite memory there). 68k: 0xEEEE. */
+
+/* logtest:   nc_printf of a few formats into the hypervisor's log (hypervisor 7); returns 1.
+   deepfault: crashes three functions deep (deepfault -> df1 -> df2 -> df3): the fault details
+              must show where, and the way there (backtrace). 68k version: returns 0. */
+
+/* spin:  natively an endless loop: the hypervisor's time limit must stop it with
+          NC_ST_TIMEOUT instead of hanging the machine (68k version: returns 0 at once).
+          Ignores its params, so it also runs under nc_run / nc_run_mp / nc_start_mp. */
 
 /* heap:  random allocations in a nc_heap (nativecall/nc_heap.h) over 'size' bytes at 'heap';
           returns the free bytes at the end (all freed: one block again), or 0xEE000000 + the

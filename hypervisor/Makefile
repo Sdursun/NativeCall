@@ -29,6 +29,8 @@ FDT_FLAGS := -mlittle-endian -mcpu=cortex-a72 -O2 -ffreestanding -nostdlib -fno-
 ifeq ($(GIC),1)
 BOOT_FLAGS += -DGIC=1
 endif
+HV_CFLAGS += $(HV_EXTRA)
+
 ifeq ($(DEBUG_LED),1)
 BOOT_FLAGS += -DDEBUG_LED=1
 HV_CFLAGS  += -DDEBUG_LED=1

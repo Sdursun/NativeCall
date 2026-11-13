@@ -13,25 +13,35 @@
 # Results in build/<CC68>/: <NAME> and <MODULE>.narm (copy both into the same directory).
 # Runs inside the nativecall-sdk Docker image (sdk/nc).
 #
-# Optional: CFLAGS68, LDFLAGS68, LIBS68 (68k), CFLAGS_NATIVE (kernels on the Pi).
+# Optional: CFLAGS68, LDFLAGS68, LIBS68 (68k), CFLAGS_NATIVE (kernels on the Pi), OPT68 (the 68k
+# optimisation level, -O2).
 
 MODULE  ?= $(NAME)
 CC68    ?= vbcc
 # 1: the .narm goes into the program as well (one file to distribute); 0: next to it only
 NC_EMBED ?= 1
+OPT68   ?= -O2
 B       := build/$(CC68)
 
 NC_INC  := $(NC_SDK)/include
 
 # ---- 68k ----
+#
+# Two things make 68k code slow under Emu68's JIT (measured with ncdemo, NOTES.md 27):
+#  - float -> int conversions as a real 68040 needs them: save FPCR, set round-to-zero, convert,
+#    restore (three FPCR accesses, ~85 ns each conversion). FINTRZ is not in the 68040, but
+#    Emu68 has it: -fpu=68060 (VBCC) and -mtune=68060 (GCC) make the compilers use it. On a
+#    real 68040 the 68040.library emulates FINTRZ: slower there, still correct.
+#  - loops closed with DBF: Emu68 ends a translation unit at them. -fno-branch-count-reg.
+# The 68k versions of the kernels ran twice as fast with both (GCC 16.2.1).
 
 ifeq ($(CC68),vbcc)
 CC_68K    := vc +aos68k
-CFLAGS_68K := -c99 -O2 -cpu=68040 -fpu=68040 -I$(NDK_INCLUDE) -I$(NC_INC) -I. $(CFLAGS68)
+CFLAGS_68K := -c99 $(OPT68) -cpu=68040 -fpu=68060 -I$(NDK_INCLUDE) -I$(NC_INC) -I. $(CFLAGS68)
 LIBS_68K  := $(LIBS68) -lm040 -lamiga
 else ifeq ($(CC68),gcc)
 CC_68K    := m68k-amigaos-gcc
-CFLAGS_68K := -O2 -m68040 -mhard-float -noixemul -Wall -I$(NC_INC) -I. $(CFLAGS68)
+CFLAGS_68K := $(OPT68) -m68040 -mtune=68060 -mhard-float -fno-branch-count-reg -noixemul -Wall -I$(NC_INC) -I. $(CFLAGS68)
 LIBS_68K  := $(LIBS68) -lm
 else
 $(error CC68 must be vbcc or gcc)
@@ -48,7 +58,7 @@ HEADERS  := $(wildcard *.h) $(wildcard $(NC_INC)/nativecall/*.h) $(wildcard $(NC
 CC_NATIVE  := aarch64-linux-gnu-gcc-14
 LD_NATIVE  := aarch64-linux-gnu-ld
 OBJCOPY_NATIVE := aarch64-linux-gnu-objcopy
-CFLAGS_NAT := -mbig-endian -mcpu=cortex-a72 -O2 -ffreestanding -nostdlib -fno-builtin-printf \
+CFLAGS_NAT := -mbig-endian -mcpu=cortex-a72 -O2 -g -fno-omit-frame-pointer -ffreestanding -nostdlib -fno-builtin-printf \
               -fPIE -mcmodel=tiny -fvisibility=hidden -fno-plt -falign-functions=16 -ffixed-x18 \
               -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables \
               -mno-outline-atomics -ffunction-sections -fdata-sections -Wall -Wextra -I$(NC_SDK)/native/include -I$(NC_INC) -I. $(CFLAGS_NATIVE)
@@ -103,6 +113,9 @@ $(NB)/$(MODULE).narm: $(NB)/$(MODULE).elf $(NB)/$(MODULE)-pic.elf
 	$(OBJCOPY_NATIVE) -O binary -j .text -j .rodata -j .data $(NB)/$(MODULE)-pic.elf $(NB)/pic1.bin
 	@cmp -s $(NB)/pic0.bin $(NB)/pic1.bin || { echo "ERROR: $(MODULE).narm is not position independent"; exit 1; }
 	$(OBJCOPY_NATIVE) -O binary -j .narm_header -j .text -j .rodata -j .data $< $@
+	@end=$$(aarch64-linux-gnu-nm $< | awk '$$3 == "__narm_end" { print $$1 }'); \
+	 [ "$$(stat -c %s $@)" -ge "$$(printf '%d' 0x$$end)" ] || \
+	 { echo "ERROR: $(MODULE).narm is shorter than the module ($$(stat -c %s $@) < 0x$$end): static variables would lie outside it"; rm -f $@; exit 1; }
 	@echo "== $@: $$(stat -c %s $@) bytes, $$(od -An -tu4 --endian=big -j8 -N4 $@ | tr -d ' ') kernels"
 
 $(B)/$(MODULE).narm: $(NB)/$(MODULE).narm | $(B)

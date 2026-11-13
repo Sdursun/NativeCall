@@ -39,6 +39,9 @@
  *   EL2. The hypervisor enters the kernel at EL1 (see hv_entry.S). If the device tree is refused
  *   the kernel starts as with the stock armstub: no native calls, but it boots.
  * - The EL3 setup moved behind the firmware-defined words at 0xd8..0xff.
+ * - setup_gic makes PPI 26 (the EL2 timer) Group 0 and lets the GIC signal Group 0 as FIQ: the
+ *   hypervisor's time limit of native code (hv_config.h). Secure settings, so Emu68's own
+ *   Non-secure GIC setup cannot undo them.
  *
  * This file is little-endian, like every armstub: the firmware writes dtb_ptr32 and
  * kernel_entry32, Emu68 writes the spin_cpuN words with LE64().
@@ -92,6 +95,8 @@
 #define IT_NR		0x8	// Number of interrupt enable registers (256 total irqs)
 #define GICD_CTRLR	0x0
 #define GICD_IGROUPR	0x80
+#define GICD_ISENABLER	0x100
+#define GICD_IPRIORITYR	0x400
 
 .section .text
 .globl _start
@@ -187,6 +192,11 @@ el3_setup:
 
 	/* Set up CNTVOFF_EL2 */
 	msr CNTVOFF_EL2, xzr
+
+	/* The EL2 timer off on every core: its reset value is UNKNOWN, and setup_gic makes its
+	   interrupt (PPI 26) a FIQ on every core. Core 2 (the PiStorm housekeeper) never passes
+	   through the hypervisor, so nothing else would ever switch it off there (NOTES.md 26.6). */
+	msr CNTHP_CTL_EL2, xzr
 
 	/* Enable FP/SIMD */
 	/* Bit 10 (TFP) is set to 0 */
@@ -334,17 +344,24 @@ setup_gic:				// Called from secure mode - set all interrupts to group 1 and ena
 	str	w0, [x2, #GICD_CTRLR]
 2:
 	add	x1, x2, #(GIC_CPUB - GIC_DISTB)
-	mov	w0, #0x1e7
-	str	w0, [x1, #GICC_CTRLR]	// Enable group 1 IRQs from CPU interface
+	mov	w0, #0x1ef
+	str	w0, [x1, #GICC_CTRLR]	// Enable group 0 and 1 from the CPU interface, group 0 as FIQ
 	mov	w0, #0xff
 	str	w0, [x1, #GICC_PMR]	// priority mask
-	add	x2, x2, #GICD_IGROUPR
+	add	x3, x2, #GICD_IGROUPR
 	mov	x0, #(IT_NR * 4)
 	mov	w1, #~0			// group 1 all the things
 3:
 	subs	x0, x0, #4
-	str	w1, [x2, x0]
+	str	w1, [x3, x0]
 	b.ne	3b
+	/* ... except PPI 26, the EL2 timer: group 0 (FIQ), highest priority, enabled. Banked per
+	   core, so every core does it here. The hypervisor's time limit (hv_config.h). */
+	mov	w1, #~(1 << HV_TIMER_PPI)
+	str	w1, [x3]		// GICD_IGROUPR0
+	strb	wzr, [x2, #(GICD_IPRIORITYR + HV_TIMER_PPI)]
+	mov	w1, #(1 << HV_TIMER_PPI)
+	str	w1, [x2, #GICD_ISENABLER]
 	ret
 
 .ltorg

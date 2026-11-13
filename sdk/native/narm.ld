@@ -26,9 +26,18 @@ SECTIONS
     .text : { *(.text .text.*) }
     .rodata : { *(.rodata .rodata.*) }
 
-    /* .bss goes into the file as zeros: the 68k loader only allocates the file size */
-    .data : { *(.data .data.*) *(.bss .bss.*) *(COMMON) }
-    . = ALIGN(16);
+    /* .bss goes into the file as zeros: the 68k loader only allocates the file size.
+       The QUAD at the end is what makes that true: with nothing but .bss input the output
+       section would be NOBITS and objcopy would leave it out of the image, so that kernels
+       wrote their static variables past the end of the allocation (NOTES.md 26.7). The mk file
+       checks the image size against __narm_end. */
+    .data :
+    {
+        *(.data .data.*) *(.bss .bss.*) *(COMMON)
+        . = ALIGN(8);
+        QUAD(0)
+        . = ALIGN(16);
+    }
     __narm_end = .;
 
     .got : { *(.got .got.*) }
