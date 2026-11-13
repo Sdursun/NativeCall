@@ -293,5 +293,8 @@ Emu68 itself is not part of this repository: https://github.com/michalsc/Emu68
 - `sdk/examples/mp3demo/minimp3.h` is minimp3 by lieff, https://github.com/lieff/minimp3 (CC0).
 - `NCStatus` uses MUI (Magic User Interface); its developer files come from the SDK's Docker image, not from
   this repository.
+- The `Copyright (c) 2001 Amiga, Inc.` line in `sdk/include/clib/nativecall_protos.h` is the fixed template of
+  the generator (sfdc); the content of that header belongs to this project.
 
-No license has been chosen yet for the rest of this project: all rights reserved by the author.
+Everything else is under the MIT License, see [LICENSE](LICENSE): free to use, change and redistribute, also
+commercially, as long as the copyright notice stays.
