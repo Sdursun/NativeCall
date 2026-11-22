@@ -45,13 +45,23 @@ struct NCHeapBlock
 #define NC__HB(h, off)  ((struct NCHeapBlock *)((char *)(h) + (off)))
 #define NC__OFF(h, b)   ((NC_U32)((char *)(b) - (char *)(h)))
 
-/* The 68k side has one core: no lock */
+/* The 68k side has one core: no lock. On the PC (WinUAE x64) the pool's threads share the heap
+   as the Pi's cores do; the field is big-endian there, so the lock word is reached through its
+   offset (GCC does not take the address of a reversed field). 0 is free either way. */
+#if NC_X64
+#define NC__HEAP_LOCKW(h)   ((NC_U32 *)((char *)(h) + offsetof(struct NCHeap, lock)))
+#endif
+
 static inline void nc__heap_lock(struct NCHeap *h)
 {
 #if NC_NATIVE
     while (__atomic_exchange_n(&h->lock, 1, __ATOMIC_ACQUIRE))
         while (__atomic_load_n(&h->lock, __ATOMIC_RELAXED))
             __asm__ volatile("yield");
+#elif NC_X64
+    while (__atomic_exchange_n(NC__HEAP_LOCKW(h), 1, __ATOMIC_ACQUIRE))
+        while (__atomic_load_n(NC__HEAP_LOCKW(h), __ATOMIC_RELAXED))
+            __builtin_ia32_pause();
 #endif
 }
 
@@ -59,6 +69,8 @@ static inline void nc__heap_unlock(struct NCHeap *h)
 {
 #if NC_NATIVE
     __atomic_store_n(&h->lock, 0, __ATOMIC_RELEASE);
+#elif NC_X64
+    __atomic_store_n(NC__HEAP_LOCKW(h), 0, __ATOMIC_RELEASE);
 #endif
 }
 
@@ -221,6 +233,9 @@ static inline NC_U32 nc_heap_avail(struct NCHeap *h)
 #if NC_NATIVE
 /* The heap malloc() & co. use in this module (native side; <stdlib.h> of sdk/native/include) */
 extern struct NCHeap *nc__heap_current __attribute__((visibility("hidden")));   /* narm_rt.c */
+static inline void nc_heap_select(struct NCHeap *h) { nc__heap_current = h; }
+#elif NC_X64
+extern struct NCHeap *nc__heap_current;                                         /* narm_rt.c */
 static inline void nc_heap_select(struct NCHeap *h) { nc__heap_current = h; }
 #endif
 

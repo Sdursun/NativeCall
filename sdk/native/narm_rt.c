@@ -1,4 +1,5 @@
-/* Minimal runtime for native modules: GCC may emit calls to these even without libc. */
+/* Minimal runtime for native modules: GCC may emit calls to these even without libc.
+   Also linked into the x64 modules for WinUAE (sdk/x64), which have no C library either. */
 
 #include <nativecall/kernel.h>
 #include <nativecall/nc_abi.h>
@@ -147,6 +148,37 @@ struct NCHeap *nc__heap_current;
 
 #include <stdarg.h>
 
+#if NC_X64
+/* WinUAE x64: the host DLL sets nc_x64_logfn when it loads the module (kernel.h NC_MODULE) */
+NC_LOCAL_STRUCTS_BEGIN
+struct nc__x64env
+{
+    void (*log_write)(const char *text, uint32_t len);
+};
+NC_LOCAL_STRUCTS_END
+#define NC__ENV     const struct nc__x64env
+
+static NC__ENV *nc__env(void)
+{
+    static struct nc__x64env env;
+
+    if (!nc_x64_logfn)
+        return NULL;
+    env.log_write = nc_x64_logfn;
+    return &env;
+}
+
+/* The DLL's entry point: there is no C library to start */
+int __stdcall nc_x64_entry(void *instance, unsigned long reason, void *reserved)
+{
+    (void)instance;
+    (void)reason;
+    (void)reserved;
+    return 1;
+}
+#else
+#define NC__ENV     const struct NCEnv
+
 /* The hypervisor's environment of this core, or NULL (older hypervisor). TPIDR_EL2 points at its
    per-core state while native code runs; before hypervisor 7 the word at NC_CPU_ENV is 0. */
 static const struct NCEnv *nc__env(void)
@@ -162,10 +194,11 @@ static const struct NCEnv *nc__env(void)
         return NULL;
     return env;
 }
+#endif
 
 void nc_log(const char *text)
 {
-    const struct NCEnv *env = nc__env();
+    NC__ENV *env = nc__env();
     size_t n;
 
     if (!env || !text)
@@ -225,7 +258,7 @@ static void nc__num(struct nc__out *o, uint64_t v, unsigned base, int upper, int
 
 void nc_printf(const char *format, ...)
 {
-    const struct NCEnv *env = nc__env();
+    NC__ENV *env = nc__env();
     struct nc__out o;
     const char *f;
     va_list ap;

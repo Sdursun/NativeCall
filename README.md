@@ -7,6 +7,10 @@ and the heavy computing runs natively, with NEON and on several ARM cores.
 **The Emu68 kernel is not modified.** NativeCall is one file on the SD card, one line in `config.txt`, and a
 shared library. Programs keep working on any Amiga: without NativeCall the same code runs as 68k.
 
+**Under WinUAE the same programs run their kernels on the PC's x64 processor** (since 1.8.0): one SDK, one
+kernel source, one 68k binary for the Pi, for WinUAE and for any other Amiga. See
+[sdk/x64/README.md](sdk/x64/README.md).
+
 For a guided explanation, see **[docs/NativeCall.pdf](docs/NativeCall.pdf)**.
 
 ![Mandelbrot demo on the A1200](docs/images/mandeldemo.png)
@@ -29,7 +33,27 @@ measurements: [RESULTS.md](RESULTS.md).
 
 ## Status
 
-Version **1.7.0**: `nativecall.library` 1.7, hypervisor 8. New since 1.6.0:
+Version **1.8.0**: `nativecall.library` 1.8, hypervisor 8 (the armstub has not changed since 1.7.0). New since
+1.7.0:
+
+- **WinUAE x64 backend:** without the hypervisor, the library runs kernels on the PC through WinUAE's
+  `uaenative.library` and a host DLL in WinUAE's `plugins` folder. Programs do not change; programs built with
+  this SDK (`NC_X64 := 1`) carry the x64 module inside, and v1.7.0 binaries use a `.nx64` file next to them.
+  `nc_run_mp` and `nc_start_mp` run on a thread pool (all logical processors but one), and faults, the time
+  limit, the log, fault details and statistics work as on the Pi. `mandeldemo`, the v1.7.0 binary: 58.5 Miter/s
+  on WinUAE's 68k JIT, 6044 Miter/s on a 24-thread PC (103x).
+- **Byte order:** the Pi and the 68k are big-endian, the PC is not. Parameter structures are converted by the
+  compiler; plain arrays in 68k memory are read and written with `NC_GET16/32/F` and `NC_PUT16/32/F`, which are
+  plain accesses on the Pi (all `.narm` modules of the examples are byte for byte those of 1.7.0).
+- **SDK:** `nc_now_us` reads the PC's clock under WinUAE (the emulation's clock misses the time a kernel runs);
+  `nc_addr_ok` accepts all of the Amiga's RAM there.
+- **Fixes:** `mp3demo BENCH` said "No MP3 sound found" for files shorter than `SECONDS` (20 by default); x64
+  modules now use the SDK's runtime and `nc_heap` as on the Pi (8 to 12 KB instead of 40 to 60).
+
+Tested on the A1200 with library 1.8 (all examples, GCC and VBCC, and the v1.7.0 binaries) and under WinUAE
+6.1 beta (below).
+
+New in 1.7.0:
 
 - **Time limit:** a kernel that runs too long (1 s by default, `nc_set_timeout`) is stopped and the call returns
   `NC_ST_TIMEOUT`. An endless loop no longer locks the machine.
@@ -109,6 +133,14 @@ Version **1.7.0**: `nativecall.library` 1.7, hypervisor 8. New since 1.6.0:
 
 Details and the Emu68 source references: [NOTES.md](NOTES.md).
 
+**Under WinUAE** (no Pi, no hypervisor) the library finds WinUAE's `uaenative.library` instead and loads
+`nativecall-windows-x86-64.dll` from WinUAE's `plugins` folder. Each module's kernels are also built as a small
+Windows DLL (the `.nx64`, embedded in the program); the host DLL loads it and calls the kernels with WinUAE's
+host address of Amiga memory. Kernels see the 68k's data in its big-endian layout: the compiler converts
+parameter structures (`scalar_storage_order`), and `NC_GET32` & co. convert plain arrays. A vectored exception
+handler and a watchdog thread turn crashes and endless loops into `NC_ST_FAULT` and `NC_ST_TIMEOUT`, so WinUAE
+goes on. Details: [sdk/x64/README.md](sdk/x64/README.md), [NOTES.md](NOTES.md) 30.
+
 ## Writing a program
 
 Write a kernel once; the SDK builds it for the Pi and as the 68k fallback.
@@ -139,6 +171,8 @@ cd myprog
 ```
 
 Kernel rules, the API, batching, memory, and adding it to an existing project: [sdk/README.md](sdk/README.md).
+`NC_X64 := 1` in the Makefile also builds the kernels for WinUAE; kernels that compute with 16-bit, 32-bit or
+float values in plain 68k arrays read and write them with `NC_GET32` / `NC_PUT32` & co.
 
 ## Installing
 
@@ -146,6 +180,9 @@ Copy `nativecall-armstub.bin` to the SD card's FAT partition, add `armstub=nativ
 `config.txt`, copy `nativecall.library` to `LIBS:`, and power the Amiga off and on. To go back, comment out the
 line. Details: [INSTALL.md](INSTALL.md). Ready-made binaries and the SDK are in the
 [releases](https://github.com/Sdursun/NativeCall/releases).
+
+WinUAE: copy `nativecall-windows-x86-64.dll` to WinUAE's `plugins` folder, turn on Settings > Host >
+Miscellaneous > Allow native code (`native_code=true`), and copy `nativecall.library` to `LIBS:`.
 
 ## Building from source
 
@@ -241,19 +278,36 @@ Also tested during development:
   override.
 - **Soak:** 5 million native calls in the background during 5 × 16 MB of network copies; the md5 sums matched and
   Workbench kept responding.
-- **WinUAE (68060, no armstub):** with and without the library, both compilers fall back to the 68k with right
-  results (release 1.5.0; not repeated for this release).
+- **WinUAE without native code (68060, no armstub, `native_code=false`):** both compilers fall back to the 68k
+  with right results (release 1.5.0; not repeated since).
 - **Loops:** `bench` 350 times and the whole `hello` test set 20 times in a row, over two boots, after the `.bss`
   fix (NOTES.md 26.7).
 
-**Exactly what ran on this release's binaries.** `./build.sh` reproduces the armstub and library byte for byte.
-With them on the A1200 (hypervisor 8, library 1.7), all ten examples passed with GCC and with VBCC: `hello` with
-every test above, `bench`, `cputest`, `ncdemo`, `mandeldemo`, the four new graphics demos and `mp3demo BENCH`;
-`NCStatus` and `NCLog STATS` showed the load. All QEMU scenarios passed with the same armstub binary.
+### WinUAE: kernels on the PC
+
+WinUAE 6.1 beta, 68060 with JIT, `native_code=true`, a PC with 24 logical processors:
+
+| Command | Checks |
+|---|---|
+| `hello LOOP=200 FAULT MP HEAP TIME ASYNC TIMEOUT LOG CANCEL` | as on the Pi: the fault gives `0x84` (Windows exception `C0000005`), the time-outs `0x87`, the log text is the Pi's, `LOG` finds four frames of the nested fault and the bad pointer in `rcx` |
+| a kernel recursing without end | `0x84` (`C00000FD`) on the emulation thread and on the pool, twice each; calls work afterwards |
+| `bench`, `mp3demo BENCH`, an `nbodydemo` step test | results as on the 68k; `nc_run` and `nc_run_mp` bit-identical |
+| `ncdemo`, `mandeldemo`, `raydemo`, `voxeldemo`, `filterdemo`, `nbodydemo` at 1280x720 | all three modes |
+| the programs alone, without `.nx64` files | the embedded module is used (GCC and VBCC) |
+| v1.7.0 binaries with a `.nx64` next to them | run on the PC unchanged |
+
+`cputest` reports its Mandelbrot as DIFFERENT there: WinUAE's 68k FPU computes with 80 bits; the PC's result
+is exactly the Pi's.
+
+**Exactly what ran on this release's binaries.** `./build.sh` reproduces the armstub, the library and the host
+DLL byte for byte. On the A1200 (hypervisor 8, library 1.8 from `LIBS:`) all examples passed with GCC and with
+VBCC: `hello` with every test above, `bench`, `cputest`, `ncdemo`, `mandeldemo`, the graphics demos and
+`mp3demo BENCH`; the v1.7.0 binaries gave the same results with library 1.8. Under WinUAE the `dist/` binaries
+ran their embedded x64 modules (table above).
 
 **Not tested:** `async_log` / `ppc_enable` with several cores, a real Pi 4 with 1, 2 or 4 GB, a machine other
-than the one above, the new demos on a screen without RTG, and `NCStatus` with a MUI other than the one on the
-test machine.
+than the one above, the new demos on a screen without RTG, `NCStatus` with a MUI other than the one on the
+test machine, and WinUAE other than 6.1 beta 22/23 or a PC other than the one above.
 
 ## Limitations
 
@@ -267,16 +321,26 @@ test machine.
 - A plain C kernel gains about 2x, since Emu68's JIT is already good. The big gains need NEON, special instructions,
   several cores, or a batch instead of many small calls. GPU-limited programs gain little.
 - Three cores at full load heat a Pi 4 past 80 °C without cooling, and it slows down.
+- **WinUAE:** the emulation stands still while a kernel runs on the PC, so keep calls short there too. Data a
+  kernel reaches through `NC_PTR()` is big-endian: plain arrays of 16-bit, 32-bit or float values need the
+  `NC_GET` / `NC_PUT` accessors, or the kernel computes wrong results on the PC (on the Pi they cost nothing).
+  NEON paths are ARM only; the PC runs the plain C path. A job still running when the Amiga is reset runs to
+  its end.
+- **WinUAE 6.1 beta resets or crashes now and then on a 640x480 AGA screen fed with `WriteChunkyPixels`, with or
+  without NativeCall** (the ExecBase pointer at address 4 is cleared, not by the CPU). The demos reach it sooner
+  when they run faster; use an RTG screen there (NOTES.md 30).
 
 ## Repository layout
 
 ```
 hypervisor/     armstub and EL2 hypervisor
 sdk/            SDK: library, headers, kernels support, tools, examples, template
+sdk/x64/        the WinUAE host DLL (kernels on the PC)
 qemu/           hypervisor test with unmodified Emu68
 tools/qemu/     Docker images for that test
 docs/           NativeCall.pdf and its HTML source
-dist/           after ./build.sh: armstub, Libs/, C/ (NCLog, PiReboot), Tools/ (NCStatus), examples
+dist/           after ./build.sh: armstub, Libs/, C/ (NCLog, PiReboot), Tools/ (NCStatus), WinUAE/ (host DLL),
+                examples
 INSTALL.md      installation and rollback
 RESULTS.md      measurements
 NOTES.md        technical notes, with Emu68 source references
@@ -288,7 +352,9 @@ Emu68 itself is not part of this repository: https://github.com/michalsc/Emu68
 
 - `hypervisor/boot.S` is based on `armstub8.S` from https://github.com/raspberrypi/tools (BSD 3-Clause, notice in
   the file).
-- Built with VBCC, vasm, vlink, GCC, and the Hyperion NDK 3.2; none of their sources are in this repository.
+- Built with VBCC, vasm, vlink, GCC, MinGW-w64, and the Hyperion NDK 3.2; none of their sources are in this
+  repository. The WinUAE backend uses WinUAE's `uaenative.library` interface (`uni_*`); no WinUAE source is
+  included.
 - `tools/qemu/wfe-trap.py` patches QEMU's source when the test image is built; QEMU itself is not included.
 - `sdk/examples/mp3demo/minimp3.h` is minimp3 by lieff, https://github.com/lieff/minimp3 (CC0).
 - `NCStatus` uses MUI (Magic User Interface); its developer files come from the SDK's Docker image, not from

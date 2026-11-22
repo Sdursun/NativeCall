@@ -10,7 +10,8 @@
 #   Libs/nativecall.library         -> LIBS:
 #   C/NCLog, C/PiReboot             -> C: (hypervisor log, last fault, statistics; restart the Pi)
 #   Tools/NCStatus (+ .info)        -> anywhere (MUI window: state of nativecall, load of the ARM cores)
-#   vbcc/, gcc/                     -> example programs with their .narm modules
+#   vbcc/, gcc/                     -> example programs (with their .narm and .nx64 modules inside)
+#   WinUAE/nativecall-windows-x86-64.dll -> WinUAE's plugins folder (kernels on the PC, sdk/x64/README.md)
 
 set -e
 cd "$(dirname "$0")"
@@ -39,8 +40,11 @@ if [ "$TARGET" = all ]; then
     cp sdk/build/NCLog sdk/build/PiReboot dist/C/
     mkdir -p dist/Tools
     cp sdk/build/NCStatus sdk/build/NCStatus.info dist/Tools/
+    mkdir -p dist/WinUAE
+    cp sdk/build/nativecall-windows-x86-64.dll dist/WinUAE/
     for ex in $EXAMPLES; do
         for cc in vbcc gcc; do
+            # the .narm and the .nx64 are in the program too; the .narm also next to it
             cp sdk/examples/$ex/build/$cc/$ex sdk/examples/$ex/build/$cc/$ex.narm dist/$cc/
         done
     done

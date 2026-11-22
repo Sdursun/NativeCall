@@ -1,6 +1,7 @@
 /*
     string.h for native kernels (no libc on the Pi side; sdk/native/narm_rt.c has these).
-    Only used when building the .narm module; the 68k build of a kernel gets its compiler's own.
+    Only used when building the .narm and .nx64 modules; the 68k build of a kernel gets its
+    compiler's own.
 */
 #ifndef NC_NATIVE_STRING_H
 #define NC_NATIVE_STRING_H

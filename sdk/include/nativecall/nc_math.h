@@ -70,6 +70,12 @@ static inline float nc_sqrtf(float x)
     __asm__("fsqrt %s0, %s1" : "=w"(r) : "w"(x));
     return r;
 }
+#elif NC_X64
+/* sqrtss: no libm in the x64 modules either */
+static inline float nc_sqrtf(float x)
+{
+    return __builtin_sqrtf(x);      /* -fno-math-errno (mk): one instruction */
+}
 #else
 #include <math.h>
 static inline float nc_sqrtf(float x)

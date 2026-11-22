@@ -8,18 +8,24 @@ NC_KERNEL(transform)
     const struct Vertex *v = NC_PTR(const struct Vertex, p->vertices);
     struct SVertex *s = NC_PTR(struct SVertex, p->svertices);
     const struct Camera *c = NC_PTR(const struct Camera, p->camera);
+#if NC_X64
+    /* on the PC c->rot is big-endian: a plain float pointer to it would read it unconverted */
+#define R(k) (c->rot[k])
+#else
     const float *r = c->rot;
+#define R(k) (r[k])
+#endif
     NC_U32 i;
 
     for (i = p->range.from; i < p->range.to; i++)
     {
         const struct Vertex *a = &v[i];
-        float x = r[0] * a->x + r[1] * a->y + r[2] * a->z + c->trans[0];
-        float y = r[3] * a->x + r[4] * a->y + r[5] * a->z + c->trans[1];
-        float z = r[6] * a->x + r[7] * a->y + r[8] * a->z + c->trans[2];
-        float nx = r[0] * a->nx + r[1] * a->ny + r[2] * a->nz;
-        float ny = r[3] * a->nx + r[4] * a->ny + r[5] * a->nz;
-        float nz = r[6] * a->nx + r[7] * a->ny + r[8] * a->nz;
+        float x = R(0) * a->x + R(1) * a->y + R(2) * a->z + c->trans[0];
+        float y = R(3) * a->x + R(4) * a->y + R(5) * a->z + c->trans[1];
+        float z = R(6) * a->x + R(7) * a->y + R(8) * a->z + c->trans[2];
+        float nx = R(0) * a->nx + R(1) * a->ny + R(2) * a->nz;
+        float ny = R(3) * a->nx + R(4) * a->ny + R(5) * a->nz;
+        float nz = R(6) * a->nx + R(7) * a->ny + R(8) * a->nz;
         float d = -(nx * c->light[0] + ny * c->light[1] + nz * c->light[2]);
         float shade, spec;
 
@@ -39,6 +45,7 @@ NC_KERNEL(transform)
     }
     return 0;
 }
+#undef R
 
 /* ceil(v - 0.5): first pixel whose centre is at or after v (no libm in kernels) */
 static int first_pixel(float v)

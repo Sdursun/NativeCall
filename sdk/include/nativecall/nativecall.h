@@ -118,12 +118,14 @@ BOOL nc_stats(struct NCKernels *k, ULONG index, struct NCKernelStats *stats, BOO
 APTR nc_alloc(ULONG size);
 void nc_free(APTR memory, ULONG size);
 
-/* TRUE if native code can access [memory, memory + size): Fast RAM from 16 MB up. Memory the
+/* TRUE if native code can access [memory, memory + size): Fast RAM from 16 MB up on the Pi; any of
+   the Amiga's RAM, chip RAM too, under WinUAE with the x64 backend (library 1.8). Memory the
    program got elsewhere (its BSS, AllocMem) is fine too when this says so; nc_alloc() always
-   returns such memory when native calls are possible. */
+   returns such memory when native calls are possible. The answer for the x64 backend needs the
+   library open (nc_open); the regions are read again when it opens or closes. */
 BOOL nc_addr_ok(CONST_APTR memory, ULONG size);
 
-/* The Fast RAM region native code can see that holds the most memory: [*lo, *hi). Pointers
+/* The memory region native code can see that holds the most memory: [*lo, *hi). Pointers
    inside it are fine for kernels, so a hot loop can check with two compares instead of
    calling nc_addr_ok(). FALSE (and 0, 0) if there is none. nc_addr_ok() itself also only
    compares (the regions are read once). */
@@ -133,7 +135,11 @@ BOOL nc_addr_limits(ULONG *lo, ULONG *hi);
    the ARM counter through Emu68's MOVEC registers (well under a microsecond, no Amiga bus
    access); elsewhere timer.device's EClock. timer.device costs ~20 us per call on a PiStorm,
    more than most things worth measuring. nc_now_ticks() gives the raw 64-bit counter and its
-   frequency (Emu68: 54 MHz on a Pi 4). Neither needs nc_open(). */
+   frequency (Emu68: 54 MHz on a Pi 4). Neither needs nc_open().
+   Under WinUAE with the x64 backend (library 1.8) they read the PC's clock once nc_open() found
+   it (1 MHz): the emulation stands still while a kernel runs, and the Amiga's own clocks miss
+   most of that time. The clock is chosen again when the library is opened or closed, so take
+   both ends of a measurement while the kernels are open. */
 ULONG nc_now_us(void);
 void nc_now_ticks(ULONG *hi, ULONG *lo, ULONG *freq);
 

@@ -23,13 +23,15 @@ cd myprog
 
 On the Amiga:
 
-- Copy `nativecall.library` 1.7 to `LIBS:` (`sdk/build/nativecall.library`, built by `sdk/nc sdk`).
+- Copy `nativecall.library` 1.8 to `LIBS:` (`sdk/build/nativecall.library`, built by `sdk/nc sdk`).
 - **The program is one file:** the `.narm` module is embedded in it (`NC_EMBED=1`, the default). The
   `.narm` file next to it is optional (see "Single file").
 - Native calls need the nativecall armstub on the Pi (../INSTALL.md), version 3 for several ARM
   cores, 4 for asynchronous jobs, 6 for the time limit, 7 for the log, fault details, memory
   protection and job cancel, 8 for statistics. With an older armstub the program still runs
   natively, without those. Without any armstub it runs its 68k version.
+- **Under WinUAE** the kernels can run on the PC instead (`NC_X64 := 1` in the Makefile, the host DLL
+  in WinUAE's `plugins` folder, "Allow native code" on): see "WinUAE: kernels on the PC" below.
 
 **Coming from SDK 1.5.0 or 1.6.0:** rebuild your modules. Those SDKs left a module's `.bss` out of
 the image, so a kernel with zero-initialised static or global variables wrote past its module
@@ -135,9 +137,9 @@ nc_close(k);
 | `nc_status(k)` | Status of the last native call (`NC_ST_OK`, `NC_ST_FAULT`, ...); after `nc_open` also why there are no native calls (`NC_ST_MISMATCH`, `NC_ST_NOMODULE`, ...). See `nativecall/nc_abi.h`. |
 | `nc_stats(k, i, &s, reset)` | **Native run time** of a kernel: calls, total / longest / last time (µs). Needs hypervisor 2 and library 1.2. |
 | `nc_alloc` / `nc_free` | Memory a kernel can see (Fast RAM above 16 MB, cleared). |
-| `nc_addr_ok(p, size)` | Can native code see this memory? Only compares, about 0.1 µs. |
+| `nc_addr_ok(p, size)` | Can native code see this memory? Only compares, about 0.1 µs. Under WinUAE's x64 backend all of the Amiga's RAM (after `nc_open`). |
 | `nc_addr_limits(&lo, &hi)` | The largest Fast RAM region native code can see, for two compares in hot loops. |
-| `nc_now_us()` / `nc_now_ticks()` | A cheap clock. On Emu68 it reads the ARM counter (about 2 µs); timer.device costs about 20 µs per call on a PiStorm. Does not need `nc_open`. |
+| `nc_now_us()` / `nc_now_ticks()` | A cheap clock. On Emu68 it reads the ARM counter (about 2 µs); timer.device costs about 20 µs per call on a PiStorm. Does not need `nc_open`. Under WinUAE's x64 backend it reads the PC's clock once `nc_open` found it: the emulation's own clocks miss the time a kernel runs. |
 
 The functions of `nativecall.library` can be used directly too (`<proto/nativecall.h>`): `NC_GetInfo`
 (hypervisor statistics), `NC_LastFault` (ESR/FAR/ELR of the last native fault), `NC_GetKernelStats`,
@@ -154,6 +156,7 @@ The functions of `nativecall.library` can be used directly too (`<proto/nativeca
 | 1.5 | `NC_StartMP`, `NC_JobDone`, `NC_WaitJob` | asynchronous jobs: hypervisor 4 |
 | 1.6 | `NC_SetTimeout`, `NC_ReadLog`, `NC_GetFaultInfo`, `NC_CancelJob`; unloading cancels jobs; 64 KB of slack behind a module | time limit: hypervisor 6; log, fault details, cancel: hypervisor 7 |
 | 1.7 | `NC_GetStats`, `NC_ListModules` | statistics: hypervisor 8 |
+| 1.8 | kernels on the PC under WinUAE (`NC_FEAT_X64`) | WinUAE with native code and the host DLL; no change with the hypervisor |
 
 `ncsupport.c` checks the library version. With an older library `nc_run_mp` becomes `nc_run`,
 `nc_start_mp` runs the job at once, `nc_stats` and `nc_set_timeout` return FALSE and `nc_cancel`
@@ -168,8 +171,8 @@ handler that cancels its jobs and unloads its modules. Programs without a C runt
 A kernel runs on the Pi, outside AmigaOS (../NOTES.md 9): with `nc_call` / `nc_run` on Emu68's core,
 with `nc_run_mp` also on the cores Emu68 leaves idle (../NOTES.md 22).
 
-1. **No AmigaOS calls, and no libc.** The native build has small SDK headers
-   (`sdk/native/include`):
+1. **No AmigaOS calls, and no libc.** The native build (and the x64 build for WinUAE) has small SDK
+   headers (`sdk/native/include`):
    - `string.h`: `mem*`, `strlen`, `strnlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`,
      `strchr`, `strrchr`, `memchr`;
    - `stdlib.h`: `malloc` / `calloc` / `realloc` / `free` (`nativecall/nc_heap.h`, below), `abs`.
@@ -193,6 +196,12 @@ with `nc_run_mp` also on the cores Emu68 leaves idle (../NOTES.md 22).
    - No `double` fields: VBCC aligns them to 2 or 4 bytes.
    - Pin the layout with `NC_CHECK_SIZE` / `NC_CHECK_OFFSET`.
    - Read pointer fields with `NC_PTR()`.
+   - **For WinUAE's x64 backend** (little-endian PC): structures defined after `kernel.h` keep the
+     68k's layout by themselves, so params and arrays of such structures are right. Plain arrays of
+     16-bit, 32-bit or float values reached through `NC_PTR()` are not converted: read and write them
+     with `NC_GET16/32/F` and `NC_PUT16/32/F` (plain accesses on the 68k and the Pi). Do not take the
+     address of a field of such a structure (`const float *r = c->rot`): the build stops with an
+     error; index it instead. Bytes need nothing. See sdk/x64/README.md.
 5. **A call has a time limit** (hypervisor 6): 1 s by default, `nc_set_timeout` changes it. A kernel
    that runs past it is stopped and the call returns `NC_ST_TIMEOUT`; with `nc_run_mp` and
    `nc_start_mp` the limit applies to each piece. The machine stays locked until then, so give
@@ -272,7 +281,7 @@ nc_heap_free(h, buf);
 - The heap lives in the block and survives between calls.
 - It holds offsets, not pointers, so the same heap also works in the kernel's 68k version.
 - It has a lock: pieces of `nc_run_mp` may allocate at the same time.
-- `malloc()` goes to the heap only in the native build; the 68k build uses the compiler's own.
+- `malloc()` goes to the heap only in the native and x64 builds; the 68k build uses the compiler's own.
 - `hello HEAP` tests that both sides give the same result.
 
 ## Makefile
@@ -288,12 +297,15 @@ LIBS68        :=                 # extra 68k libraries
 CFLAGS_NATIVE :=                 # extra flags for the kernels' Pi build
 OPT68         := -O2             # 68k optimisation level (-O1 / -O0 if VBCC chokes on a source)
 NC_EMBED      ?= 1               # 1: the module is embedded in the program
+NC_X64        := 1               # also build the kernels for WinUAE's x64 backend (default 0)
+NC_EMBED_X64  ?= 1               # 1: that module is embedded too
+CFLAGS_X64    :=                 # extra flags for the kernels' x64 build
 NC_SDK        ?= ../sdk
 include $(NC_SDK)/mk/nativecall.mk
 ```
 
 Targets: `nc make` (program + module), `nc make narm` (only the module and `<prefix>_image.c`),
-`nc make clean`. A changed header rebuilds everything.
+`nc make nx64` (only the x64 module), `nc make clean`. A changed header rebuilds everything.
 
 | Compiler | Flags |
 |---|---|
@@ -329,6 +341,11 @@ module in this order:
 The embedded copy is also loaded into memory on machines without a PiStorm (the size of the module,
 usually a few KB). Use `NC_EMBED=0` to avoid that.
 
+With `NC_X64 := 1` the x64 module (`.nx64`) is embedded as well (`NC_EMBED_X64`, 8 to 12 KB for the
+examples). Under WinUAE's x64 backend `nc_open` hands the library that copy in step 2; without one
+the library looks for a `.nx64` file that belongs to the `.narm` in `ENV:NativeCall/ModuleDir` and
+`PROGDIR:`.
+
 Library 1.1 cannot load from memory, so with it the module always comes from a file, unchecked.
 
 ## Adding it to an existing project
@@ -353,6 +370,8 @@ In a project whose 68k side is built by its own compiler (for example bebbo GCC 
    Include path: `sdk/include`.
 4. Without `game_image.c`, compile the kernels file for the 68k with `-DNC_NO_IMAGE`. The module is
    then loaded from a `PROGDIR:` file, without a version check.
+5. Coming from SDK 1.7.0: regenerate `game_image.c` (`nc make narm`). It now also holds the x64
+   module (empty without `NC_X64 := 1`), and `kernel.h` expects its two new symbols.
 
 ## Measuring
 
@@ -472,6 +491,27 @@ running all the time, and only cores 1 and 3 did the work.
 Uses: decoding (MP3) and mixing sound, skeleton poses, preparing the next frame: any job whose result
 the 68k does not need right away.
 
+## WinUAE: kernels on the PC (library 1.8)
+
+Under WinUAE there is no Pi. With `native_code=true` and `nativecall-windows-x86-64.dll` in WinUAE's
+`plugins` folder, library 1.8 runs the kernels on the PC's processor instead. The program does not
+change and does not know: `nc_call`, `nc_run`, `nc_run_mp`, `nc_start_mp`, `nc_cancel`, time limits,
+the log, fault details and statistics all work; `NCLog STATS` and `NCStatus` say "WinUAE x64".
+
+- **Build:** `NC_X64 := 1`. The kernels file is also compiled with MinGW-w64 into a small Windows DLL
+  without a C library (SDK headers and runtime as on the Pi), and embedded in the program.
+- **Byte order:** see rule 4 above (`NC_GET32` & co.). All examples use the accessors.
+- **Cores:** `nc_run_mp` and `nc_start_mp` use a thread pool of all the PC's logical processors but
+  one; `nc_cores` says how many. The emulation stands still during `nc_call` / `nc_run` /
+  `nc_run_mp`, not during `nc_start_mp` jobs.
+- **Faults:** crashes, stack overflows and endless loops end the call with `NC_ST_FAULT` or
+  `NC_ST_TIMEOUT`; WinUAE goes on. `nc addr2line build/x64/<module>.dbg.dll <offsets>` turns
+  `NCLog FAULT`'s backtrace into source lines.
+- **Speed** (WinUAE 6.1 beta, 24 logical processors): `mandeldemo` 640x480 6044 Miter/s on the pool
+  against 58.5 on WinUAE's 68k JIT.
+
+Everything about it, with measurements and known WinUAE problems: [x64/README.md](x64/README.md).
+
 ## Examples (`examples/`)
 
 | Example | What it shows |
@@ -540,6 +580,9 @@ cd sdk/examples/cputest && ../../nc make && ../../nc make CC68=gcc
 - **Fault details:** `NCLog FAULT` (or `NC_GetFaultInfo()`) gives the registers of the last fault and
   a backtrace as module offsets. Turn them into source lines on the PC:
   `nc addr2line build/native/<module>.elf 0x30 0x4c 0x6c 0xeb0` → `df3 at ..._kernels.c:167`, ...
+  Under WinUAE's x64 backend: `nc addr2line build/x64/<module>.dbg.dll <offsets>`; the registers are
+  the PC's (`rax` ... `r15`) and the exception is a Windows one (`C0000005` access violation,
+  `C00000FD` stack overflow).
 - **`NC_LastFault()`:** the older way: FAR and the low 32 bits of ELR.
 - **`NC_GetInfo()`:** trap, call and fault counters.
 - **Stack of the 68k version:** the 68k version of a kernel runs on the caller's stack, and a Shell
@@ -576,7 +619,7 @@ cd sdk/examples/cputest && ../../nc make && ../../nc make CC68=gcc
 ```
 sdk/
   nc                  command: new, make, sdk, image, shell, addr2line
-  docker/Dockerfile   nativecall-sdk:1 (GCC 16.2, VBCC 0.9h P3, NDK 3.2, aarch64 GCC 14)
+  docker/Dockerfile   nativecall-sdk:1 (GCC 16.2, VBCC 0.9h P3, NDK 3.2, aarch64 GCC 14, MinGW-w64)
   include/
     nativecall/       kernel.h, nativecall.h, nc_abi.h, nc_math.h, nc_heap.h
     proto/ clib/ inline/   nativecall.library (VBCC and GCC; clib/inline are generated from the sfd)
@@ -585,7 +628,9 @@ sdk/
   lib68k/             ncsupport.c (nc_open, nc_call, ...; compiled into every program)
   native/             narm.ld, narm_rt.c, include/ (string.h, stdlib.h for kernels)
   mk/nativecall.mk    project rules
-  tools/narm2c.py     turns a module into C data (embedding, build ID)
+  tools/narm2c.py     turns a module into C data (embedding, build ID; also the .nx64)
+  tools/mknx64.py     packs the x64 DLL of a module into its .nx64
+  x64/                ncx_host.c: the WinUAE host DLL; README.md
   tools/nclog.c       NCLog: log, last fault, statistics
   tools/ncstatus.c    NCStatus (MUI); tools/mkicon.py draws its icon
   tools/pireboot.c    PiReboot: restart the Pi from the Amiga

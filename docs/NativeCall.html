@@ -39,7 +39,7 @@
 
 <h1>NativeCall</h1>
 <p class="lead">Native ARM code for 68k Amiga programs on a PiStorm with a Raspberry Pi 4, without changing Emu68.</p>
-<p class="meta">Version 1.7.0: <code>nativecall.library</code> 1.7, hypervisor 8. November 2026.</p>
+<p class="meta">Version 1.8.0: <code>nativecall.library</code> 1.8, hypervisor 8. November 2026.</p>
 
 <h2>What it is</h2>
 <p>A PiStorm replaces the Amiga's 68000-class CPU with a Raspberry Pi. Emu68 runs on the Pi and translates 68k code to
@@ -191,6 +191,24 @@ with the temperature and the programs that have native modules loaded; <code>NCL
   <figcaption><code>NCStatus</code> on the A1200 while <code>mandeldemo</code> runs on three cores.</figcaption>
 </figure>
 
+<h3>8. The same programs under WinUAE</h3>
+<p>Under WinUAE there is no Pi, but there is a much faster processor: the PC's. WinUAE can give the Amiga
+<code>uaenative.library</code>, which calls functions in Windows DLLs. When library 1.8 finds no hypervisor, it uses that instead,
+with a host DLL in WinUAE's <code>plugins</code> folder. The SDK builds each module's kernels a third time, as a small Windows DLL
+without a C library, and embeds it in the program next to the ARM module. The program does not change and does not know which
+processor ran its kernels.</p>
+<ul>
+  <li><b>Byte order.</b> The 68k and Emu68's ARM are big-endian, the PC is not. The compiler keeps parameter structures in the 68k's
+  layout (<code>scalar_storage_order</code>); plain arrays of numbers in 68k memory are read with <code>NC_GET32</code> and friends,
+  which are plain accesses on the Pi.</li>
+  <li><b>Cores.</b> <code>nc_run_mp</code> and <code>nc_start_mp</code> use a thread pool of all the PC's logical processors but one.</li>
+  <li><b>Safety.</b> A crash, a stack overflow or an endless loop in a kernel ends the call with <code>NC_ST_FAULT</code> or
+  <code>NC_ST_TIMEOUT</code>, as on the Pi; WinUAE goes on. The log, fault details and statistics work the same way.</li>
+  <li><b>Clock.</b> The emulation stands still while a kernel runs, and its clocks miss that time; <code>nc_now_us</code> reads the PC's clock there.</li>
+</ul>
+<p>On a PC with 24 logical processors, the unchanged 1.7.0 Mandelbrot demo went from 58.5 million iterations per second on WinUAE's
+68k JIT to 6044 on the pool, 103 times as many.</p>
+
 <h2>Using it</h2>
 <h3>Install</h3>
 <ol>
@@ -199,6 +217,9 @@ with the temperature and the programs that have native modules loaded; <code>NCL
   <li>Copy <code>nativecall.library</code> to <code>LIBS:</code>, <code>NCLog</code> and <code>PiReboot</code> to <code>C:</code>, and <code>NCStatus</code> wherever you like.</li>
   <li>Power the Amiga off and on. Run <code>hello LOOP=1000 FAULT TIMEOUT</code> and <code>NCLog STATS</code> to check.</li>
 </ol>
+<p><b>WinUAE:</b> copy <code>nativecall-windows-x86-64.dll</code> to WinUAE's <code>plugins</code> folder, turn on
+Settings &gt; Host &gt; Miscellaneous &gt; Allow native code, and copy <code>nativecall.library</code> to <code>LIBS:</code>.
+<code>NCLog STATS</code> then says <code>WinUAE x64</code>.</p>
 <div class="box warn"><p><b>Tested on an 8 GB Pi 4.</b> The hypervisor finds its place in the device tree, so other RAM sizes should work (tested in QEMU), and if the
 layout is unexpected Emu68 simply starts without native calls. To go back, put a <code>#</code> in front of the line, using a PC if necessary.</p></div>
 
@@ -229,7 +250,8 @@ struct ScaleParams *p = nc_alloc(sizeof(*p));
 /* ... */
 nc_run_mp(k, NCK_scale, p, sizeof(*p), 0, count);
 nc_close(k);</code></pre>
-<p>Everything builds in Docker, with VBCC or GCC on the 68k side. The module is embedded in the program, so it remains one file.</p>
+<p>Everything builds in Docker, with VBCC or GCC on the 68k side. The module is embedded in the program, so it remains one file.
+<code>NC_X64 := 1</code> in the Makefile adds the WinUAE module, embedded too.</p>
 <pre><code>sdk/nc image             # once
 sdk/nc new myprog
 cd myprog
@@ -275,9 +297,12 @@ native calls, caught faults, invalid entries, 1000-call loops, core capture, sha
 forbidden memory, cancelled jobs and statistics. QEMU needed small patches: to trap <code>wfe</code> as real cores do, and to model the Pi 4's interrupt controller
 with its security extensions. The device tree parser is tested alone on 16 layouts. QEMU proves the protocol but not the speed, and it has no real Pi 4 firmware or caches.</p>
 <p><b>On the A1200.</b> Example programs check results against the 68k version, count which core did what, verify the allocator on both sides, and measure call costs. During
-5 million native calls, 5 × 16 MB were copied over the network with matching checksums while Workbench kept responding. For this release, all ten examples built by
-both compilers ran from the release binaries, and the checksum benchmark ran 350 times in a row.</p>
-<p><b>In WinUAE.</b> With no hypervisor, and with and without the library, programs from both compilers took the 68k path with correct results (release 1.5.0).</p>
+5 million native calls, 5 × 16 MB were copied over the network with matching checksums while Workbench kept responding. For release 1.7.0 the checksum benchmark ran 350 times in a row;
+for 1.8.0 all ten examples built by both compilers ran again with library 1.8, and so did the 1.7.0 binaries.</p>
+<p><b>In WinUAE.</b> Without native code, and with and without the library, programs from both compilers took the 68k path with correct results (release 1.5.0).
+With native code (WinUAE 6.1 beta, release 1.8.0), every <code>hello</code> test passed on the PC, a kernel recursing without end was caught on the
+emulation thread and on the pool, and the MP3 decoder, the n-body step and the checksums matched the 68k. While testing we also met WinUAE resetting
+on a 640x480 AGA screen with or without NativeCall: the demos are tested there on an RTG screen.</p>
 <p>Bugs found this way shaped the design: a black screen on the first boot from a skipped cache flush, the phantom requests described above, wrong results from a
 code model that assumed page alignment, and a saved processor state overwritten by a native fault. They are written up in <code>NOTES.md</code>.</p>
 <div class="box warn"><p><b>If you built modules with SDK 1.5.0 or 1.6.0, rebuild them.</b> Those SDKs left a module's zero-initialised variables out of the
@@ -291,6 +316,7 @@ a hypervisor bug. Library 1.6 and newer also keep 64 KB of slack behind every mo
   <li>The time limit needs the Pi 4's interrupt controller, the default; an armstub built for <code>enable_gic=0</code> has none.</li>
   <li>Three cores at full load heat a Pi 4 past 80 °C without cooling, and it slows down: the Mandelbrot demo dropped from 27 to 24 fps.</li>
   <li><code>async_log</code> and <code>ppc_enable</code> with several cores are understood from the Emu68 source but have not been tested.</li>
+  <li>Under WinUAE, kernels that compute with numbers in plain 68k arrays need the byte order accessors, NEON paths fall back to plain C, and the emulation stands still during a call. Tested with WinUAE 6.1 beta on one PC.</li>
 </ul>
 
 <h2>More</h2>
@@ -298,6 +324,7 @@ a hypervisor bug. Library 1.6 and newer also keep 64 KB of slack behind every mo
   <tr><td><code>README.md</code></td><td>overview, build, tests</td></tr>
   <tr><td><code>INSTALL.md</code></td><td>installation, rollback, verification</td></tr>
   <tr><td><code>sdk/README.md</code></td><td>the API, kernel rules, adding it to an existing project</td></tr>
+  <tr><td><code>sdk/x64/README.md</code></td><td>kernels on the PC under WinUAE</td></tr>
   <tr><td><code>RESULTS.md</code></td><td>all measurements</td></tr>
   <tr><td><code>NOTES.md</code></td><td>technical notes with Emu68 source references</td></tr>
 </table>

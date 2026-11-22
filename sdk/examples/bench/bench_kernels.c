@@ -143,7 +143,8 @@ NC_KERNEL(xform)
 
     for (i = 0; i < p->count; i++, in += 4, out += 4)
         for (r = 0; r < 4; r++)
-            out[r] = m[4 * r] * in[0] + m[4 * r + 1] * in[1] + m[4 * r + 2] * in[2] + m[4 * r + 3] * in[3];
+            NC_PUTF(&out[r], NC_GETF(&m[4 * r]) * NC_GETF(&in[0]) + NC_GETF(&m[4 * r + 1]) * NC_GETF(&in[1]) +
+                             NC_GETF(&m[4 * r + 2]) * NC_GETF(&in[2]) + NC_GETF(&m[4 * r + 3]) * NC_GETF(&in[3]));
     return p->count;
 }
 

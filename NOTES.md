@@ -669,6 +669,62 @@ Users asked: is NativeCall active, how loaded are the cores, how hot is the Pi, 
      after another, known-good ones included; hours went into bugs that did not exist. Use it to see whether a
      program opens and draws correctly, and test stability on the real machine.
 
+## 30. Kernels on the PC under WinUAE (library 1.8)
+
+The question was whether the same programs could use a fast processor under WinUAE too. A first attempt ran
+`mandeldemo`'s kernel unchanged in a Windows DLL (`#pragma scalar_storage_order big-endian` converts its
+params) and called it through WinUAE's `uaenative.library`: 8x WinUAE's 68k JIT on one thread. Then it went
+into the library.
+
+- **Library 1.8:** with no hypervisor it opens `uaenative.library` and `uni_open_library("nativecall")`, which
+  loads `nativecall-windows-x86-64.dll` from WinUAE's `plugins` folder. Calls go through `call_function`
+  (LVO -48; a0 the function, d1-d7/a1-a5 its arguments). With the hypervisor nothing changes.
+- **Modules:** a `.nx64` is a 32-byte big-endian header (`'NX64'`, version, the CRC32 of the `.narm` of the
+  same build, kernel count, DLL offset and size, `nc_abi.h` `struct NX64Header`) and a DLL exporting
+  `ncx_module` (entry table, `nc_x64_membase`, log hook). The host DLL writes it to
+  `%TEMP%\nativecall\` under a name of its own and loads it: each load is its own instance with its own
+  statics, as on the Pi. The library builds a made-up `NativeHeader` (entries 16, 32, ...) so the rest of
+  it (entries, statistics, jobs) works unchanged. A `.nx64` is used only with its own `.narm`: embedded in
+  the program (`nc_open` hands it over when `NC_GetStats` reports `NC_FEAT_X64`), or as a file found by
+  the `.narm`'s CRC32 (v1.7.0 binaries).
+- **Memory:** kernels reach Amiga memory at WinUAE's host address of it (`uni_resolve`; one offset for all
+  RAM, checked). `nc_addr_ok` accepts all of the Amiga's RAM there, chip RAM too.
+- **Byte order:** structures after `kernel.h` are big-endian by GCC's `scalar_storage_order`; plain arrays use
+  `NC_GET16/32/F` / `NC_PUT16/32/F` (plain accesses on the 68k and the Pi: the `.narm` files of all examples
+  stayed byte for byte the same), `nc_to_68k16`, and `NC_LOCAL_STRUCTS_BEGIN/END` around a library's own
+  structures (minimp3). Taking the address of a reversed field gives a pointer that reads unconverted
+  (`ncdemo`'s torus was missing at first): the mk turns GCC's message about it into an error.
+- **Pool:** `nc_run_mp` and `nc_start_mp` run on worker threads (logical processors less two, plus the
+  emulation thread); a worker spins 100 µs for the next piece, then sleeps. Starting threads for every call
+  gave 1.2x; the pool gave 103x (`mandeldemo`, 24 logical processors). Jobs copy their params; `nc_wait`
+  lets the emulation thread help 0.5 ms at a time; `nc_cancel` skips pieces not started.
+- **Faults and time limit:** every call is guarded. A vectored exception handler sends a faulting thread back
+  to the start of its call (`__builtin_setjmp`/`longjmp`, `_resetstkoflw` after a stack overflow); a
+  watchdog thread (10 ms) stops a kernel past its limit with `SuspendThread`/`SetThreadContext`, but only
+  while it runs code of its own module, so no Windows or C library lock stays taken. `NC_ST_FAULT` /
+  `NC_ST_TIMEOUT`, and WinUAE goes on.
+- **Fault details:** Windows exception, registers, and a backtrace walked with the module's unwind tables
+  (`RtlVirtualUnwind`): GCC for Windows x64 keeps no frame pointer chain (`rbp` points into the frame), so
+  the Pi's way gave only one frame. `nc addr2line build/x64/<module>.dbg.dll`.
+- **Log and statistics:** `nc_printf` / `nc_log` into a 16 KB ring in the host DLL; `NCLog` and `NCStatus`
+  show "WinUAE x64" and the share of time spent in kernels.
+- **No C library in modules:** the x64 build uses the Pi's SDK headers and runtime (`narm_rt.c`, `nc_heap`
+  `malloc`, the same `nc_printf`), `-ffreestanding`, `-nostdlib`, an own entry point, libgcc only for
+  `___chkstk_ms`. Modules went from 40-63 KB to 8-12 KB and import nothing. That also fixed two bugs:
+  `nc_heap`'s lock did nothing on the PC (pool threads could corrupt a heap), and `malloc` came from
+  Windows instead of the program's heap.
+- **Clock:** the emulation stands still while a kernel runs, and WinUAE's catch-up shows only part of that
+  time to the Amiga (a 1 s call looked like 85 ms to timer.device). `nc_now_us` reads the PC's clock there
+  (`NC_GetStats`, 1 MHz).
+- **WinUAE's own resets:** WinUAE 6.1 beta 22 sometimes reset the Amiga or crashed (dumps at
+  `winuae64.exe+0x12cdf3a`, reading through ExecBase 0). Address 4 is cleared, but a GDB watchpoint on it never
+  fired with or without the JIT, so not by the CPU. It happened with the 68k demos and no NativeCall library
+  loaded too, and only on the 640x480 AGA screen fed with `WriteChunkyPixels`; 57 runs on a 1280x720 RTG
+  screen had none. Faster kernels only meet it sooner.
+- **Also found:** `mp3demo BENCH` reported no sound for files shorter than `SECONDS` (the call that meets the
+  end of the file returns 0 Hz); `cputest` reports its Mandelbrot as different under WinUAE because WinUAE's
+  68k FPU computes with 80 bits, while the PC's result is exactly the Pi's.
+
 ## Known limitations and open work
 
 - Only the 8 GB Pi 4 has been tested on hardware. Hypervisor 5 handles other sizes (section 25), tested in
@@ -679,3 +735,5 @@ Users asked: is NativeCall active, how loaded are the cores, how hot is the Pi, 
 - The compiler versions in the SDK image are not pinned (section 27).
 - `nc test` (a helper that compares 68k and native results), calling a kernel by name, and choosing 68k or
   native by measurement are ideas from a game port's report that are not done.
+- The WinUAE backend was tested with WinUAE 6.1 beta 22 and 23 on one PC. NEON paths have no x64
+  counterpart (the PC runs the plain C path); a job still running when the Amiga is reset runs to its end.

@@ -56,7 +56,10 @@ static void print_stats(void)
     args[1] = NativeCallBase->lib_Version;
     args[2] = NativeCallBase->lib_Revision;
     args[3] = (ULONG)((s1.features & NC_FEAT_TIMEOUT) ? "works" : "not available");
-    VPrintf("Hypervisor %lu, nativecall.library %lu.%lu, time limit %s\n", args);
+    if (s1.features & NC_FEAT_X64)
+        VPrintf("WinUAE x64 (kernels on the PC), nativecall.library %lu.%lu, time limit %s\n", args + 1);
+    else
+        VPrintf("Hypervisor %lu, nativecall.library %lu.%lu, time limit %s\n", args);
     if (s1.temperature)
     {
         args[0] = s1.temperature / 1000;
@@ -68,12 +71,15 @@ static void print_stats(void)
         args[0] = i;
         if (!(s1.core[i].flags & NC_CORE_NATIVE))
         {
-            VPrintf("Core %lu: used by Emu68\n", args);
+            VPrintf((s1.features & NC_FEAT_X64) ? "Core %lu: -\n" : "Core %lu: used by Emu68\n", args);
             continue;
         }
         args[1] = (s1.core[i].busy_lo - s0.core[i].busy_lo) / (ticks / 100);
         args[2] = s1.core[i].calls - s0.core[i].calls;
-        args[3] = (ULONG)(i == 0 ? " (68k)" : " (helper)");
+        if (s1.features & NC_FEAT_X64)
+            args[3] = (ULONG)(i == 0 ? " (WinUAE's emulation thread)" : " (PC worker threads, average)");
+        else
+            args[3] = (ULONG)(i == 0 ? " (68k)" : " (helper)");
         VPrintf("Core %lu: %3lu %% native, %lu calls in the last second%s\n", args);
     }
     args[0] = s1.jobs;
@@ -102,14 +108,58 @@ static void print_stats(void)
     }
 }
 
+/* WinUAE x64 (library 1.8): the fault of a kernel on the PC */
+static void print_fault_x64(const struct NCFaultInfo *fi)
+{
+    static const char *names[16] = { "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+                                     "r8 ", "r9 ", "r10", "r11", "r12", "r13", "r14", "r15" };
+    ULONG i, args[4];
+
+    args[0] = (ULONG)(fi->status == NC_ST_TIMEOUT ? "Time-out" : "Fault");
+    args[1] = fi->core;
+    args[2] = fi->count;
+    VPrintf("%s of a kernel on the PC, thread %lu (0 = WinUAE's emulation thread), number %lu since WinUAE started\n", args);
+    args[0] = fi->esr;
+    args[1] = fi->far_hi;
+    args[2] = fi->far_lo;
+    VPrintf("Windows exception %08lx (0 = time-out), address %08lx%08lx\n", args);
+    args[0] = fi->elr_hi;
+    args[1] = fi->elr_lo;
+    VPrintf("Instruction at %08lx%08lx\n", args);
+    for (i = 0; i < 16; i++)
+    {
+        args[0] = (ULONG)names[i];
+        args[1] = fi->x[i][0];
+        args[2] = fi->x[i][1];
+        VPrintf("%s %08lx%08lx", args);
+        PutStr((i & 3) == 3 ? "\n" : "  ");
+    }
+    PutStr("Backtrace (module offsets; the first is where it happened):\n  nc addr2line build/x64/<module>.dbg.dll");
+    for (i = 0; i < NC_FAULT_FRAMES; i++)
+    {
+        if (fi->backtrace[i] == NC_FAULT_NOOFFSET)
+            continue;
+        args[0] = fi->backtrace[i];
+        VPrintf(" 0x%lx", args);
+    }
+    PutStr("\n");
+}
+
 static void print_fault(void)
 {
     struct NCFaultInfo fi;
     ULONG i, args[4];
+    struct NCStats s;
 
     if (!NC_GetFaultInfo(&fi))
     {
         PutStr("No native fault since the Pi started (or no hypervisor 7)\n");
+        return;
+    }
+    if ((NativeCallBase->lib_Version > 1 || NativeCallBase->lib_Revision >= 7) && NC_GetStats(&s)
+        && (s.features & NC_FEAT_X64))
+    {
+        print_fault_x64(&fi);
         return;
     }
     args[0] = (ULONG)(fi.status == NC_ST_TIMEOUT ? "Time-out" : "Fault");

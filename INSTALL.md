@@ -4,7 +4,8 @@ NativeCall lets 68k programs call native AArch64 functions **without touching th
 small EL2 program (the hypervisor) replaces the **armstub** that the Pi firmware loads (NOTES.md 9).
 Installing it means one file and one line in `config.txt`.
 
-The binaries named below are in `binaries/` of a release zip, or in `dist/` after `./build.sh`.
+The binaries named below are in `binaries/` of a release zip, or in `dist/` after `./build.sh`. To run kernels
+on the PC under WinUAE instead, see "WinUAE" below.
 
 ## Requirements
 
@@ -45,6 +46,23 @@ The binaries named below are in `binaries/` of a release zip, or in `dist/` afte
 **Updating from an older release:** replace `nativecall-armstub.bin` and `nativecall.library`, then restart
 the Pi (power off and on, or `PiReboot NOW`, below). Rebuild your own modules with the new SDK if their kernels
 have zero-initialised static or global variables (NOTES.md 26.7).
+
+## WinUAE (kernels on the PC)
+
+No armstub is involved; the kernels run on the PC's processor (sdk/x64/README.md).
+
+1. 64-bit WinUAE (`winuae64.exe`). Tested: WinUAE 6.1 beta 22 and 23.
+2. Copy `WinUAE/nativecall-windows-x86-64.dll` to WinUAE's `plugins` folder (next to `winuae64.exe`,
+   `plugins\`). WinUAE loads it only when an Amiga program asks for it.
+3. Settings > Host > Miscellaneous > **Allow native code** (`native_code=true` in the configuration).
+   This gives the Amiga `uaenative.library`; without it everything runs as 68k.
+4. Copy `nativecall.library` 1.8 to `LIBS:` (below).
+5. `NCLog STATS` says `WinUAE x64` when it works.
+
+Programs built with this SDK carry their x64 module; v1.7.0 programs need their `<prefix>.nx64` next to
+them. To go back, turn native code off or remove the DLL: programs run as 68k.
+
+To replace the DLL, quit WinUAE first: Windows keeps a loaded DLL locked.
 
 ## Rollback
 
@@ -98,8 +116,9 @@ same name stays in memory otherwise.
 
 | | |
 |---|---|
-| `nativecall.library` 1.7 | `NC_GetStats`, `NC_ListModules`: what `NCStatus` and `NCLog STATS` show (with hypervisor 8). This release. |
-| armstub, hypervisor 8 | Native time and calls per core, SoC temperature (`NC_OP_STATS`). This release. Tested in QEMU and on the A1200 (NOTES.md 28). |
+| `nativecall.library` 1.8 | Without the hypervisor, kernels on the PC under WinUAE (`uaenative.library` + `nativecall-windows-x86-64.dll`); `NC_FEAT_X64`. With the hypervisor the same as 1.7. This release. |
+| `nativecall.library` 1.7 | `NC_GetStats`, `NC_ListModules`: what `NCStatus` and `NCLog STATS` show (with hypervisor 8). |
+| armstub, hypervisor 8 | Native time and calls per core, SoC temperature (`NC_OP_STATS`). Current since release 1.7.0. Tested in QEMU and on the A1200 (NOTES.md 28). |
 | `nativecall.library` 1.6 | `NC_SetTimeout`, `NC_ReadLog`, `NC_GetFaultInfo`, `NC_CancelJob`; unloading a module cancels its jobs; 64 KB of slack behind a module. |
 | armstub, hypervisor 7 | Log, fault details, memory protection, job cancel (NOTES.md 26.4 to 26.8). |
 | armstub, hypervisor 6 | Time limit for native code (NOTES.md 26.2). |
@@ -151,7 +170,7 @@ The newer features (hypervisor 6 to 8, library 1.6 or newer):
 ```
 1> hello TIMEOUT LOG PROTECT CANCEL
 1> NCLog STATS
-Hypervisor 8, nativecall.library 1.7, time limit works
+Hypervisor 8, nativecall.library 1.8, time limit works
 Temperature 69.1 C
 Core 0:   0 % native, 0 calls in the last second (68k)
 Core 1:   0 % native, 0 calls in the last second (helper)
@@ -169,6 +188,11 @@ work the same way (RESULTS.md). The graphics demos take `WIDTH HEIGHT SECONDS AU
 in `mandeldemo`) or `N` switch between 68k, native and native on all cores, Esc ends. They look for a 16-bit
 RTG mode first, then 32-bit, then 256 colours. `mp3demo <file>` plays an MP3 through AHI (`VOLUME=`,
 `SECONDS=`, Ctrl-C stops); `mp3demo BENCH <file>` compares the decoders.
+
+Under WinUAE the same commands work. `hello FAULT` shows the Windows exception (`ESR 0xc0000005`), `hello MP`
+puts all units on "core 0" (the PC's threads are not counted per core) and `ARM cores for nc_run_mp` is the
+number of the PC's threads used. Use an RTG screen for the graphics demos (`WIDTH=1280 HEIGHT=720`, for
+example): WinUAE 6.1 beta resets now and then on a 640x480 AGA screen, with or without NativeCall.
 
 ## For developers
 

@@ -174,6 +174,8 @@ struct NCJobStatus
    Missing when the firmware's interrupt setup is not the one the armstub expects (enable_gic=0,
    another armstub stage); then native code runs without a limit, as before hypervisor 6. */
 #define NC_FEAT_TIMEOUT     0x1
+#define NC_FEAT_X64         0x80000000UL /* library 1.8: the kernels run on the PC under WinUAE (sdk/x64), there is
+                                           no hypervisor; NC_GetStats then reports PC threads */
 
 /* ---- Log (hypervisor 7+) ----------------------------------------------------------------------
 
@@ -303,6 +305,22 @@ struct NCKernelStats
 /* Emu68's fixed register mapping (NOTES.md 2): 68k D0/D1 live in AArch64 x19/x20 */
 #define NC_EMU68_REG_D0     19
 #define NC_EMU68_REG_D1     20
+
+/* ---- x64 module for WinUAE (first bytes of a .nx64 file, sdk/tools/mknx64.py) ------------- */
+
+#define NX64_MAGIC          NC_FOURCC('N','X','6','4')
+#define NX64_VERSION        1
+
+struct NX64Header
+{
+    nc_u32 magic;           /* NX64_MAGIC */
+    nc_u32 version;         /* NX64_VERSION */
+    nc_u32 narm_id;         /* CRC32 of the .narm of the same build (its build ID) */
+    nc_u32 entry_count;
+    nc_u32 dll_offset;      /* 32 */
+    nc_u32 dll_size;
+    nc_u32 reserved[2];
+};
 
 /* ---- Native module header (first bytes of a .narm file) -------------------------------------- */
 

@@ -14,7 +14,12 @@ VC      := vc +aos68k
 VASM    := vasmm68k_mot -quiet -Fhunk -m68040
 CFLAGS  := -c99 -O2 -cpu=68020 -I$(NDK_INCLUDE) -Iinclude -Iinclude/nativecall
 
-all: headers $(LIB) $(B)/NCLog $(B)/PiReboot $(B)/NCStatus $(B)/NCStatus.info
+all: headers $(LIB) $(B)/NCLog $(B)/PiReboot $(B)/NCStatus $(B)/NCStatus.info $(B)/nativecall-windows-x86-64.dll
+
+# The host side of the x64 backend (library 1.8): WinUAE's plugins folder, once (x64/README.md)
+$(B)/nativecall-windows-x86-64.dll: x64/ncx_host.c | $(B)
+	x86_64-w64-mingw32-gcc -O2 -Wall -Wno-format-truncation -shared -static -s -Wl,--no-insert-timestamp -o $@ $<
+	@echo "== $@: $$(stat -c %s $@) bytes"
 
 # PiReboot: restart the Pi from the Amiga (watchdog), e.g. after an armstub change
 $(B)/PiReboot: tools/pireboot.c | $(B)

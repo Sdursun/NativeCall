@@ -9,6 +9,13 @@
     One call block for all callers: a request runs under Forbid() and is short (the caller
     keeps native calls around 1 ms), so tasks simply take turns. The module list is protected
     by a semaphore. Built with VBCC, registerised entry points, no startup code.
+
+    1.8: without the hypervisor, under WinUAE with uaenative.library (native_code=true) and
+    nativecall-windows-x86-64.dll in WinUAE's plugins folder, kernels run on the PC's x64 CPU
+    (x64/README.md). A program loads its .narm as before; the library looks for the .nx64 of the
+    same build (CRC32 of the .narm) in ENV:NativeCall/ModuleDir and PROGDIR: and hands it to the
+    DLL. Programs do not change. Asynchronous jobs run on the DLL's thread pool while the
+    emulation goes on. Not there yet: time limit, log, fault details.
 */
 
 #include <exec/types.h>
@@ -28,7 +35,7 @@
 #include "nc_abi.h"
 
 #define LIB_VERSION     1
-#define LIB_REVISION    7
+#define LIB_REVISION    8
 
 /* Native code cannot see the low 16 MB (chip RAM, Z2 space, I/O): hypervisor/hv.c */
 #define NC_LOW_LIMIT    0x01000000UL
@@ -84,6 +91,15 @@ struct NCBase
     struct NCModule        *job_module[NC_ASYNC_JOBS];   /* NULL: slot free */
     UBYTE                   job_block[NC_ASYNC_JOBS];    /* its entry in job_status[] */
     struct Task            *job_task[NC_ASYNC_JOBS];     /* who started it (reap_jobs) */
+    /* 1.8: x64 backend under WinUAE (uaenative.library + nativecall-windows-x86-64.dll) */
+    struct SignalSemaphore  init_sem;       /* the first available() */
+    BOOL                    x64;
+    struct Library         *uni_base;
+    ULONG                   uni_host;
+    ULONG                   f_call, f_run, f_load, f_unload, f_shutdown;
+    ULONG                   f_start, f_poll, f_wait, f_cancel;  /* asynchronous jobs (optional) */
+    ULONG                   f_logread, f_faultinfo, f_stats;    /* host 2 (optional) */
+    ULONG                   job_x64[NC_ASYNC_JOBS];             /* x64: the host's job of a slot */
 };
 
 struct NCModule
@@ -98,6 +114,8 @@ struct NCModule
     ULONG           total_us;       /* their native time, as far as measured */
     ULONG           faults;         /* requests that ended in a fault or time-out */
     char            owner[32];      /* program that loaded it */
+    ULONG           x64_handle;     /* x64 backend: the host DLL's handle; base is then a made-up
+                                       NativeHeader whose entries are 16, 32, ... */
 };
 
 struct ExecBase *SysBase;
@@ -109,15 +127,40 @@ ULONG LIB_NC_WaitJob(__reg("a6") struct NCBase *nb, __reg("d0") ULONG job, __reg
 ULONG LIB_NC_CancelJob(__reg("a6") struct NCBase *nb, __reg("d0") ULONG job, __reg("a0") ULONG *status);
 
 const char LibName[] = "nativecall.library";
-const char LibIdString[] = "nativecall.library 1.7 (12.11.2026)\r\n";
-const char LibVersTag[] = "$VER: nativecall.library 1.7 (12.11.2026)";
+const char LibIdString[] = "nativecall.library 1.8 (21.11.2026)\r\n";
+const char LibVersTag[] = "$VER: nativecall.library 1.8 (21.11.2026)";
+
+/* ---- uaenative.library (WinUAE, uaenative.cpp): handles have bit 31 set ---- */
+
+ULONG nc_uni_call(__reg("a6") struct Library *uni, __reg("d0") ULONG function, __reg("a0") ULONG *regs);
+ULONG uni_open_library(__reg("a6") struct Library *uni, __reg("a1") CONST_STRPTR name, __reg("d0") ULONG min_version) = "\tjsr\t-30(a6)";
+VOID uni_close_library(__reg("a6") struct Library *uni, __reg("a1") ULONG library) = "\tjsr\t-36(a6)";
+ULONG uni_get_function(__reg("a6") struct Library *uni, __reg("a0") ULONG library, __reg("a1") CONST_STRPTR name) = "\tjsr\t-42(a6)";
+#define UNI_VALID(h)    (((h) & 0x80000000UL) != 0)
+
+/* register slots of nc_uni_call */
+enum { R_D1, R_D2, R_D3, R_D4, R_D5, R_D6, R_D7, R_A1, R_A2, R_A3, R_A4, R_A5 };
+
+/* the oldest nativecall-windows-x86-64.dll this library works with; 2 adds faults, time limit, log,
+   statistics (each looked up on its own) */
+#define NCX_HOST_VERSION    1
 
 /* ---- Memory ---- */
 
+static BOOL x64_mode;   /* memory for kernels may be anywhere: the host DLL checks it */
+
 static APTR alloc_high(ULONG size)
 {
-    APTR p = AllocMem(size, MEMF_FAST | MEMF_PUBLIC | MEMF_CLEAR);
+    APTR p;
     struct MemHeader *mh;
+
+    if (x64_mode)
+    {
+        p = AllocMem(size, MEMF_FAST | MEMF_PUBLIC | MEMF_CLEAR);
+        return p ? p : AllocMem(size, MEMF_ANY | MEMF_PUBLIC | MEMF_CLEAR);
+    }
+
+    p = AllocMem(size, MEMF_FAST | MEMF_PUBLIC | MEMF_CLEAR);
 
     if (p && (ULONG)p >= NC_LOW_LIMIT)
         return p;
@@ -197,6 +240,57 @@ static ULONG request(struct NCBase *nb, ULONG op, ULONG a0, ULONG a1, ULONG a2, 
     return result;
 }
 
+/* x64 backend: uaenative.library and the host DLL; not under Forbid() (OpenLibrary may load from
+   disk). TRUE if both are there and fit. */
+static ULONG x64_function(struct NCBase *nb, CONST_STRPTR name)
+{
+    ULONG f = uni_get_function(nb->uni_base, nb->uni_host, name);
+    return UNI_VALID(f) ? f : 0;
+}
+
+static BOOL x64_probe(struct NCBase *nb)
+{
+    ULONG regs[12] = {0}, f_version, f_cores, f_features;
+
+    if (!(nb->uni_base = OpenLibrary((CONST_STRPTR)"uaenative.library", 1)))
+        return FALSE;
+    nb->uni_host = uni_open_library(nb->uni_base, (CONST_STRPTR)"nativecall", 0);
+    if (UNI_VALID(nb->uni_host))
+    {
+        f_version = x64_function(nb, (CONST_STRPTR)"ncx_version");
+        f_cores = x64_function(nb, (CONST_STRPTR)"ncx_cores");
+        nb->f_call = x64_function(nb, (CONST_STRPTR)"ncx_call");
+        nb->f_run = x64_function(nb, (CONST_STRPTR)"ncx_run");
+        nb->f_load = x64_function(nb, (CONST_STRPTR)"ncx_load");
+        nb->f_unload = x64_function(nb, (CONST_STRPTR)"ncx_unload");
+        nb->f_shutdown = x64_function(nb, (CONST_STRPTR)"ncx_shutdown");     /* optional */
+        nb->f_start = x64_function(nb, (CONST_STRPTR)"ncx_start");
+        nb->f_poll = x64_function(nb, (CONST_STRPTR)"ncx_poll");
+        nb->f_wait = x64_function(nb, (CONST_STRPTR)"ncx_wait");
+        nb->f_cancel = x64_function(nb, (CONST_STRPTR)"ncx_cancel");
+        nb->f_logread = x64_function(nb, (CONST_STRPTR)"ncx_logread");
+        nb->f_faultinfo = x64_function(nb, (CONST_STRPTR)"ncx_faultinfo");
+        nb->f_stats = x64_function(nb, (CONST_STRPTR)"ncx_stats");
+        f_features = x64_function(nb, (CONST_STRPTR)"ncx_features");
+        if (f_version && f_cores && nb->f_call && nb->f_run && nb->f_load && nb->f_unload
+            && nc_uni_call(nb->uni_base, f_version, regs) >= NCX_HOST_VERSION)
+        {
+            nb->cores = nc_uni_call(nb->uni_base, f_cores, regs);
+            if (nb->cores < 1)
+                nb->cores = 1;
+            nb->x64 = TRUE;
+            nb->features = f_features ? nc_uni_call(nb->uni_base, f_features, regs) : NC_FEAT_X64;
+            x64_mode = TRUE;
+            return TRUE;
+        }
+        uni_close_library(nb->uni_base, nb->uni_host);
+    }
+    nb->uni_host = 0;
+    CloseLibrary(nb->uni_base);
+    nb->uni_base = NULL;
+    return FALSE;
+}
+
 static BOOL available(struct NCBase *nb)
 {
     ULONG st;
@@ -204,11 +298,10 @@ static BOOL available(struct NCBase *nb)
     if (nb->available >= 0)
         return (BOOL)nb->available;
 
+    ObtainSemaphore(&nb->init_sem);
     Forbid();
     if (nb->available < 0)
     {
-        nb->available = 0;
-
         /* CPUSHL exists on 68040/68060 only (Emu68 reports a 68040) */
         if (SysBase->AttnFlags & AFF_68040)
         {
@@ -232,6 +325,10 @@ static BOOL available(struct NCBase *nb)
         }
     }
     Permit();
+    /* no hypervisor: WinUAE's x64 backend */
+    if (nb->available < 0)
+        nb->available = x64_probe(nb) ? 1 : 0;
+    ReleaseSemaphore(&nb->init_sem);
 
     return (BOOL)nb->available;
 }
@@ -257,8 +354,15 @@ static BOOL check_header(struct NativeHeader *h, ULONG size)
     return TRUE;
 }
 
-static void free_module(struct NCModule *m)
+static void free_module(struct NCBase *nb, struct NCModule *m)
 {
+    if (m->x64_handle)
+    {
+        ULONG regs[12] = {0};
+
+        regs[R_D1] = m->x64_handle;
+        nc_uni_call(nb->uni_base, nb->f_unload, regs);
+    }
     FreeMem(m->alloc, m->alloc_size);
     FreeMem(m, sizeof(*m));
 }
@@ -296,12 +400,18 @@ static void owner_name(char *dst, ULONG size)
    -mcmodel=tiny, so any 16-byte address works, but code using ADRP only works at its link
    address modulo 4 KB: NOTES.md 15), check it and make the ARM I-cache coherent.
    fill() writes the image to the destination, with ctx. */
+static struct NCModule *load_module_x64(struct NCBase *nb, ULONG size, BOOL (*fill)(UBYTE *dst, ULONG size, APTR ctx), APTR ctx);
+
 static struct NCModule *load_module(struct NCBase *nb, ULONG size, BOOL (*fill)(UBYTE *dst, ULONG size, APTR ctx), APTR ctx)
 {
     struct NCModule *m;
     ULONG st;
 
-    if (!available(nb) || size < 16 || size > 0x100000)
+    if (!available(nb))
+        return NULL;
+    if (nb->x64)
+        return load_module_x64(nb, size, fill, ctx);
+    if (size < 16 || size > 0x100000)
         return NULL;
 
     m = AllocMem(sizeof(*m), MEMF_PUBLIC | MEMF_CLEAR);
@@ -320,7 +430,7 @@ static struct NCModule *load_module(struct NCBase *nb, ULONG size, BOOL (*fill)(
 
     if (!fill(m->base, size, ctx) || !check_header((struct NativeHeader *)m->base, size))
     {
-        free_module(m);
+        free_module(nb, m);
         return NULL;
     }
 
@@ -330,9 +440,189 @@ static struct NCModule *load_module(struct NCBase *nb, ULONG size, BOOL (*fill)(
     request(nb, NC_OP_SYNC, (ULONG)m->base, m->size, 0, &st, NULL, NULL, 0);
     if (st != NC_ST_OK)
     {
-        free_module(m);
+        free_module(nb, m);
         return NULL;
     }
+
+    ObtainSemaphore(&nb->sem);
+    AddTail((struct List *)&nb->modules, (struct Node *)&m->node);
+    ReleaseSemaphore(&nb->sem);
+    return m;
+}
+
+/* ---- x64 modules (WinUAE) ---- */
+
+/* CRC32 as zlib: the build ID of a .narm (tools/narm2c.py, tools/mknx64.py) */
+static ULONG crc32(const UBYTE *p, ULONG n)
+{
+    ULONG crc = 0xffffffffUL;
+    int k;
+
+    while (n--)
+    {
+        crc ^= *p++;
+        for (k = 0; k < 8; k++)
+            crc = (crc & 1) ? 0xedb88320UL ^ (crc >> 1) : crc >> 1;
+    }
+    return ~crc;
+}
+
+static BOOL nx64_header_ok(const struct NX64Header *h, ULONG size)
+{
+    return (BOOL)(size >= sizeof(*h) && h->magic == NX64_MAGIC && h->version == NX64_VERSION
+                  && h->dll_offset == sizeof(*h) && h->dll_size <= size - sizeof(*h)
+                  && h->entry_count > 0 && h->entry_count <= NARM_MAX_ENTRIES);
+}
+
+/* Reads a whole file into memory; *size its length. NULL if it cannot. */
+static UBYTE *read_file(CONST_STRPTR path, ULONG *size)
+{
+    BPTR fh = Open(path, MODE_OLDFILE);
+    UBYTE *buf = NULL;
+    LONG n;
+
+    if (!fh)
+        return NULL;
+    Seek(fh, 0, OFFSET_END);
+    n = Seek(fh, 0, OFFSET_BEGINNING);
+    if (n > 0 && n <= 0x1000000 && (buf = AllocMem(n, MEMF_ANY)))
+    {
+        if (Read(fh, buf, n) == n)
+            *size = (ULONG)n;
+        else
+        {
+            FreeMem(buf, n);
+            buf = NULL;
+        }
+    }
+    Close(fh);
+    return buf;
+}
+
+/* The .nx64 of the same build as a .narm (its CRC32 and kernel count) in one directory */
+static UBYTE *find_nx64_in(CONST_STRPTR dir, ULONG id, ULONG count, ULONG *size)
+{
+    struct FileInfoBlock *fib;
+    struct NX64Header h;
+    char path[256];
+    UBYTE *image = NULL;
+    BPTR lock, fh;
+    ULONG len;
+
+    if (!(lock = Lock(dir, SHARED_LOCK)))
+        return NULL;
+    fib = AllocDosObject(DOS_FIB, NULL);
+    if (fib && Examine(lock, fib))
+    {
+        while (!image && ExNext(lock, fib))
+        {
+            const char *name = (const char *)fib->fib_FileName;
+
+            for (len = 0; name[len]; len++)
+                ;
+            if (fib->fib_DirEntryType >= 0 || len < 6 || name[len - 5] != '.'
+                || (name[len - 4] | 0x20) != 'n' || (name[len - 3] | 0x20) != 'x'
+                || name[len - 2] != '6' || name[len - 1] != '4' || fib->fib_Size < (LONG)sizeof(h))
+                continue;
+            for (len = 0; dir[len] && len < sizeof(path) - 1; len++)
+                path[len] = (char)dir[len];
+            path[len] = 0;
+            if (!AddPart((STRPTR)path, (CONST_STRPTR)name, sizeof(path)))
+                continue;
+            if (!(fh = Open((CONST_STRPTR)path, MODE_OLDFILE)))
+                continue;
+            len = Read(fh, &h, sizeof(h));
+            Close(fh);
+            if (len == sizeof(h) && nx64_header_ok(&h, (ULONG)fib->fib_Size) && h.narm_id == id
+                && h.entry_count == count)
+                image = read_file((CONST_STRPTR)path, size);
+        }
+    }
+    if (fib)
+        FreeDosObject(DOS_FIB, fib);
+    UnLock(lock);
+    return image;
+}
+
+/* Where nc_open looks for the .narm: ENV:NativeCall/ModuleDir, then PROGDIR: */
+static UBYTE *find_nx64(ULONG id, ULONG count, ULONG *size)
+{
+    struct Task *t = SysBase->ThisTask;
+    char dir[200];
+    UBYTE *image = NULL;
+
+    /* DOS needs a process */
+    if (t->tc_Node.ln_Type != NT_PROCESS)
+        return NULL;
+    if (GetVar((CONST_STRPTR)"NativeCall/ModuleDir", (STRPTR)dir, sizeof(dir), 0) > 0)
+        image = find_nx64_in((CONST_STRPTR)dir, id, count, size);
+    if (!image)
+        image = find_nx64_in((CONST_STRPTR)"PROGDIR:", id, count, size);
+    return image;
+}
+
+/* A .narm (its .nx64 is looked up) or a .nx64 image: loaded into the host DLL. The module's
+   base is a made-up NativeHeader with entries 16, 32, ...: entry pointers stay unique and the
+   rest of the library (find_module, NC_GetEntry, statistics) works unchanged. */
+static struct NCModule *load_module_x64(struct NCBase *nb, ULONG size, BOOL (*fill)(UBYTE *dst, ULONG size, APTR ctx), APTR ctx)
+{
+    struct NCModule *m;
+    struct NativeHeader *h;
+    UBYTE *buf, *image = NULL;
+    ULONG image_size = 0, count = 0, regs[12] = {0}, i;
+
+    if (size < 16 || size > 0x1000000 || !(buf = AllocMem(size, MEMF_ANY)))
+        return NULL;
+    if (fill(buf, size, ctx))
+    {
+        if (nx64_header_ok((struct NX64Header *)buf, size))
+        {
+            image = buf;
+            image_size = size;
+            count = ((struct NX64Header *)buf)->entry_count;
+            buf = NULL;
+        }
+        else if (check_header((struct NativeHeader *)buf, size))
+        {
+            count = ((struct NativeHeader *)buf)->entry_count;
+            image = find_nx64(crc32(buf, size), count, &image_size);
+        }
+    }
+    if (buf)
+        FreeMem(buf, size);
+    if (!image)
+        return NULL;
+
+    regs[R_D1] = image_size;
+    regs[R_A1] = (ULONG)image;
+    regs[R_D2] = nc_uni_call(nb->uni_base, nb->f_load, regs);
+    FreeMem(image, image_size);
+    if (!regs[R_D2])
+        return NULL;
+
+    m = AllocMem(sizeof(*m), MEMF_PUBLIC | MEMF_CLEAR);
+    if (m)
+    {
+        m->x64_handle = regs[R_D2];
+        m->size = m->alloc_size = 16 * (count + 1);
+        m->alloc = AllocMem(m->alloc_size, MEMF_PUBLIC | MEMF_CLEAR);
+    }
+    if (!m || !m->alloc)
+    {
+        regs[R_D1] = regs[R_D2];
+        nc_uni_call(nb->uni_base, nb->f_unload, regs);
+        if (m)
+            FreeMem(m, sizeof(*m));
+        return NULL;
+    }
+    m->base = m->alloc;
+    h = (struct NativeHeader *)m->base;
+    h->magic = NARM_MAGIC;
+    h->version = NARM_VERSION;
+    h->entry_count = count;
+    for (i = 0; i < count; i++)
+        h->entries[i] = 16 * (i + 1);
+    owner_name(m->owner, sizeof(m->owner));
 
     ObtainSemaphore(&nb->sem);
     AddTail((struct List *)&nb->modules, (struct Node *)&m->node);
@@ -403,7 +693,7 @@ VOID LIB_NC_UnloadModule(__reg("a6") struct NCBase *nb, __reg("a0") APTR module)
             nb->kinfo[i].entry = NULL;
     Permit();
 
-    free_module(m);
+    free_module(nb, m);
 }
 
 APTR LIB_NC_GetEntry(__reg("a6") struct NCBase *nb, __reg("a0") APTR module, __reg("d0") ULONG index)
@@ -460,6 +750,28 @@ static struct KernelInfo *kernel_info(struct NCBase *nb, APTR entry, BOOL create
     return ki;
 }
 
+/* x64: NC_LastFault from the host DLL's fault details (Windows exception code, address, instruction) */
+static UBYTE *bounce(struct NCBase *nb);
+
+static void x64_last_fault(struct NCBase *nb)
+{
+    struct NCFaultInfo *fi;
+    ULONG regs[12] = {0};
+
+    if (!nb->f_faultinfo || !(fi = (struct NCFaultInfo *)bounce(nb)))
+        return;
+    ObtainSemaphore(&nb->bounce_sem);
+    regs[R_A1] = (ULONG)fi;
+    regs[R_D1] = sizeof(*fi);
+    if (nc_uni_call(nb->uni_base, nb->f_faultinfo, regs))
+    {
+        nb->last_fault[0] = fi->esr;
+        nb->last_fault[1] = fi->far_lo;
+        nb->last_fault[2] = fi->elr_lo;
+    }
+    ReleaseSemaphore(&nb->bounce_sem);
+}
+
 /* One native call; *us = native run time (0xffffffff: the hypervisor does not measure).
    mp: NULL for NC_OP_CALL, or the 4 input words of NC_OP_RUNMP. */
 static ULONG call(struct NCBase *nb, APTR entry, APTR params, struct NCModule *m, ULONG *status, ULONG *us,
@@ -468,18 +780,55 @@ static ULONG call(struct NCBase *nb, APTR entry, APTR params, struct NCModule *m
     ULONG info[8], result, per_us;
     struct KernelInfo *ki;
 
-    result = request(nb, mp ? NC_OP_RUNMP : NC_OP_CALL, (ULONG)entry, (ULONG)params, (ULONG)m->base,
-                     status, mp, info, m->timeout_us);
-    m->calls++;
-    if (*status == NC_ST_FAULT || *status == NC_ST_TIMEOUT)
-        m->faults++;
-    per_us = info[NC_CALLINFO_FREQ] / 1000000;      /* 54 on a Pi 4: no 64-bit division */
-    if (per_us == 0)
+    if (m->x64_handle)
     {
-        *us = 0xffffffff;
-        return result;
+        /* host DLL: out = status, microseconds, threads (sdk/x64/ncx_host.c) */
+        ULONG regs[12] = {0}, out[4];
+
+        out[0] = NC_ST_BADENTRY;
+        out[1] = 0;
+        regs[R_D1] = m->x64_handle;
+        regs[R_D2] = ((ULONG)((UBYTE *)entry - m->base) >> 4) - 1;
+        regs[R_A1] = (ULONG)params;
+        regs[R_A2] = (ULONG)out;
+        if (mp)
+        {
+            regs[R_D3] = mp[NC_MPINFO_FROM];
+            regs[R_D4] = mp[NC_MPINFO_TO];
+            regs[R_D5] = mp[NC_MPINFO_CHUNK];
+            regs[R_D6] = mp[NC_MPINFO_SIZE];
+            regs[R_A3] = m->timeout_us;         /* host 2: time limit of a piece */
+            result = nc_uni_call(nb->uni_base, nb->f_run, regs);
+        }
+        else
+        {
+            regs[R_D3] = m->timeout_us;
+            result = nc_uni_call(nb->uni_base, nb->f_call, regs);
+        }
+        *status = out[0];
+        *us = out[1];
+        m->calls++;
+        if (*status == NC_ST_FAULT || *status == NC_ST_TIMEOUT)
+        {
+            m->faults++;
+            x64_last_fault(nb);
+        }
     }
-    *us = info[NC_CALLINFO_TICKS] / per_us;
+    else
+    {
+        result = request(nb, mp ? NC_OP_RUNMP : NC_OP_CALL, (ULONG)entry, (ULONG)params, (ULONG)m->base,
+                         status, mp, info, m->timeout_us);
+        m->calls++;
+        if (*status == NC_ST_FAULT || *status == NC_ST_TIMEOUT)
+            m->faults++;
+        per_us = info[NC_CALLINFO_FREQ] / 1000000;      /* 54 on a Pi 4: no 64-bit division */
+        if (per_us == 0)
+        {
+            *us = 0xffffffff;
+            return result;
+        }
+        *us = info[NC_CALLINFO_TICKS] / per_us;
+    }
     m->total_us += *us;
 
     Forbid();
@@ -640,7 +989,7 @@ ULONG LIB_NC_RunMP(__reg("a6") struct NCBase *nb, __reg("a0") APTR entry, __reg(
                    __reg("d2") ULONG params_size)
 {
     /* one core, an old hypervisor or params the hypervisor cannot copy: plain NC_Run */
-    if (!available(nb) || nb->cores < 2 || nb->hv_version < 3 || params_size < 8
+    if (!available(nb) || nb->cores < 2 || (!nb->x64 && nb->hv_version < 3) || params_size < 8
         || params_size > NC_MP_PARAMS_MAX || (params_size & 3))
         return run_range(nb, entry, params, from, to, status, 0);
     return run_range(nb, entry, params, from, to, status, params_size);
@@ -655,6 +1004,8 @@ ULONG LIB_NC_Cores(__reg("a6") struct NCBase *nb)
 
 static BOOL async_ready(struct NCBase *nb)
 {
+    if (available(nb) && nb->x64)
+        return (BOOL)(nb->f_start && nb->f_poll && nb->f_wait && nb->f_cancel);
     if (!available(nb) || nb->hv_version < 4)
         return FALSE;
     if (!nb->job_status)
@@ -731,6 +1082,40 @@ ULONG LIB_NC_StartMP(__reg("a6") struct NCBase *nb, __reg("a0") APTR entry, __re
         Permit();
         if (!chunk)
             chunk = 1;
+        /* x64: many more threads than ARM cores, so smaller pieces for an even share */
+        if (nb->x64 && chunk > (to - from) / (4 * nb->cores))
+            chunk = (to - from) / (4 * nb->cores) ? (to - from) / (4 * nb->cores) : 1;
+    }
+    if (nb->x64)
+    {
+        ULONG regs[12] = {0}, id;
+
+        Forbid();
+        for (slot = 0; slot < NC_ASYNC_JOBS && nb->job_module[slot]; slot++)
+            ;
+        if (slot < NC_ASYNC_JOBS)
+        {
+            regs[R_D1] = m->x64_handle;
+            regs[R_D2] = ((ULONG)((UBYTE *)entry - m->base) >> 4) - 1;
+            regs[R_D3] = from;
+            regs[R_D4] = to;
+            regs[R_D5] = chunk;
+            regs[R_D6] = params_size;
+            regs[R_A1] = (ULONG)params;
+            regs[R_A2] = m->timeout_us;         /* host 2 */
+            id = nc_uni_call(nb->uni_base, nb->f_start, regs);
+            if (id)
+            {
+                nb->job_module[slot] = m;
+                nb->job_task[slot] = SysBase->ThisTask;
+                nb->job_x64[slot] = id;
+                m->calls++;
+            }
+            else
+                slot = NC_ASYNC_JOBS;
+        }
+        Permit();
+        return slot < NC_ASYNC_JOBS ? slot + 1 : 0;
     }
     in[NC_MPINFO_FROM] = from;
     in[NC_MPINFO_TO] = to;
@@ -764,6 +1149,13 @@ ULONG LIB_NC_StartMP(__reg("a6") struct NCBase *nb, __reg("a0") APTR entry, __re
 /* TRUE when the job is complete (reads memory only, no request) */
 BOOL LIB_NC_JobDone(__reg("a6") struct NCBase *nb, __reg("d0") ULONG job)
 {
+    if (job >= 1 && job <= NC_ASYNC_JOBS && nb->x64 && nb->job_module[job - 1])
+    {
+        ULONG regs[12] = {0};
+
+        regs[R_D1] = nb->job_x64[job - 1];
+        return (BOOL)(nc_uni_call(nb->uni_base, nb->f_poll, regs) != 0);
+    }
     if (job < 1 || job > NC_ASYNC_JOBS || !nb->job_status || !nb->job_module[job - 1])
         return TRUE;
     return (BOOL)(nb->job_status[nb->job_block[job - 1]].done != 0);
@@ -777,7 +1169,31 @@ ULONG LIB_NC_WaitJob(__reg("a6") struct NCBase *nb, __reg("d0") ULONG job, __reg
 {
     ULONG st = NC_ST_BADJOB, result = 0xffffffff;
 
-    if (job >= 1 && job <= NC_ASYNC_JOBS && nb->job_module[job - 1])
+    if (job >= 1 && job <= NC_ASYNC_JOBS && nb->job_module[job - 1] && nb->x64)
+    {
+        /* the emulation thread helps for at most 0.5 ms, then the 68k runs a little */
+        ULONG regs[12] = {0}, out[4];
+
+        do
+        {
+            out[0] = NC_ST_BADJOB;
+            regs[R_D1] = nb->job_x64[job - 1];
+            regs[R_D2] = 500;
+            regs[R_A2] = (ULONG)out;
+            result = nc_uni_call(nb->uni_base, nb->f_wait, regs);
+            st = out[0];
+        }
+        while (st == NC_ST_RUNNING);
+        if (st == NC_ST_OK || st == NC_ST_CANCELLED)
+            nb->job_module[job - 1]->total_us += out[1];
+        else if (st == NC_ST_FAULT || st == NC_ST_TIMEOUT)
+        {
+            nb->job_module[job - 1]->faults++;
+            x64_last_fault(nb);
+        }
+        nb->job_module[job - 1] = NULL;
+    }
+    else if (job >= 1 && job <= NC_ASYNC_JOBS && nb->job_module[job - 1])
     {
         do
             result = request(nb, NC_OP_WAIT, job - 1, 0, 0, &st, NULL, NULL, 0);
@@ -797,7 +1213,14 @@ ULONG LIB_NC_CancelJob(__reg("a6") struct NCBase *nb, __reg("d0") ULONG job, __r
 {
     ULONG st;
 
-    if (job >= 1 && job <= NC_ASYNC_JOBS && nb->job_module[job - 1])
+    if (job >= 1 && job <= NC_ASYNC_JOBS && nb->job_module[job - 1] && nb->x64)
+    {
+        ULONG regs[12] = {0};
+
+        regs[R_D1] = nb->job_x64[job - 1];
+        nc_uni_call(nb->uni_base, nb->f_cancel, regs);
+    }
+    else if (job >= 1 && job <= NC_ASYNC_JOBS && nb->job_module[job - 1])
         request(nb, NC_OP_CANCEL, job - 1, 0, 0, &st, NULL, NULL, 0);
     return LIB_NC_WaitJob(nb, job, status);
 }
@@ -834,7 +1257,7 @@ BOOL LIB_NC_GetInfo(__reg("a6") struct NCBase *nb, __reg("a0") ULONG *info)
 {
     ULONG st;
 
-    if (!available(nb))
+    if (!available(nb) || nb->x64)
         return FALSE;
     request(nb, NC_OP_INFO, 0, 0, 0, &st, NULL, info, 0);
     return (BOOL)(st == NC_ST_OK);
@@ -891,6 +1314,23 @@ ULONG LIB_NC_ReadLog(__reg("a6") struct NCBase *nb, __reg("a0") APTR buffer, __r
     ULONG info[8], st, n = 0, part;
     UBYTE *b;
 
+    if (buffer && position && available(nb) && nb->x64)
+    {
+        /* the host DLL writes into the buffer itself */
+        ULONG regs[12] = {0}, out[2];
+
+        if (!nb->f_logread)
+            return 0;
+        regs[R_A1] = (ULONG)buffer;
+        regs[R_D1] = size;
+        regs[R_D2] = *position;
+        regs[R_A2] = (ULONG)out;
+        out[0] = *position;
+        n = nc_uni_call(nb->uni_base, nb->f_logread, regs);
+        *position = out[0];
+        return n;
+    }
+
     if (!buffer || !position || !available(nb) || nb->hv_version < 7 || !(b = bounce(nb)))
         return 0;
     ObtainSemaphore(&nb->bounce_sem);
@@ -916,6 +1356,17 @@ BOOL LIB_NC_GetFaultInfo(__reg("a6") struct NCBase *nb, __reg("a0") struct NCFau
     UBYTE *b;
     BOOL ok;
 
+    if (fi && available(nb) && nb->x64)
+    {
+        ULONG regs[12] = {0};
+
+        if (!nb->f_faultinfo)
+            return FALSE;
+        regs[R_A1] = (ULONG)fi;
+        regs[R_D1] = sizeof(*fi);
+        return (BOOL)(nc_uni_call(nb->uni_base, nb->f_faultinfo, regs) != 0);
+    }
+
     if (!fi || !available(nb) || nb->hv_version < 7 || !(b = bounce(nb)))
         return FALSE;
     ObtainSemaphore(&nb->bounce_sem);
@@ -934,6 +1385,17 @@ BOOL LIB_NC_GetStats(__reg("a6") struct NCBase *nb, __reg("a0") struct NCStats *
     ULONG st;
     UBYTE *b;
     BOOL ok;
+
+    if (stats && available(nb) && nb->x64)
+    {
+        ULONG regs[12] = {0};
+
+        if (!nb->f_stats)
+            return FALSE;
+        regs[R_A1] = (ULONG)stats;
+        regs[R_D1] = sizeof(*stats);
+        return (BOOL)(nc_uni_call(nb->uni_base, nb->f_stats, regs) != 0);
+    }
 
     if (!stats || !available(nb) || nb->hv_version < 8 || !(b = bounce(nb)))
         return FALSE;
@@ -990,20 +1452,34 @@ static void cleanup(struct NCBase *nb)
     struct MinNode *n;
     int i;
 
-    while ((n = nb->modules.mlh_Head)->mln_Succ)
-    {
-        Remove((struct Node *)n);
-        free_module((struct NCModule *)n);
-    }
+    /* jobs first: they run code of the modules (1.8; before, modules were freed first) */
     for (i = 0; i < NC_ASYNC_JOBS; i++)
         if (nb->job_module[i])
             LIB_NC_CancelJob(nb, i + 1, NULL);
+    while ((n = nb->modules.mlh_Head)->mln_Succ)
+    {
+        Remove((struct Node *)n);
+        free_module(nb, (struct NCModule *)n);
+    }
     if (nb->job_status_alloc)
         FreeMem(nb->job_status_alloc, NC_ASYNC_JOBS * sizeof(struct NCJobStatus) + 16);
     if (nb->block_alloc)
         FreeMem(nb->block_alloc, 2 * NC_BLOCK_SIZE);
     if (nb->bounce)
         FreeMem(nb->bounce, BOUNCE_SIZE);
+    if (nb->uni_host)
+    {
+        /* the host DLL's thread pool ends, so that the DLL can be unloaded */
+        if (nb->f_shutdown)
+        {
+            ULONG regs[12] = {0};
+
+            nc_uni_call(nb->uni_base, nb->f_shutdown, regs);
+        }
+        uni_close_library(nb->uni_base, nb->uni_host);
+    }
+    if (nb->uni_base)
+        CloseLibrary(nb->uni_base);
     if (TimerBase)
         CloseDevice((struct IORequest *)&nb->tr);
     if (DOSBase)
@@ -1025,6 +1501,7 @@ struct NCBase *LibInit(__reg("d0") struct NCBase *nb, __reg("a0") BPTR seglist, 
     nb->available = -1;
     InitSemaphore(&nb->sem);
     InitSemaphore(&nb->bounce_sem);
+    InitSemaphore(&nb->init_sem);
     nb->modules.mlh_Head = (struct MinNode *)&nb->modules.mlh_Tail;
     nb->modules.mlh_Tail = NULL;
     nb->modules.mlh_TailPred = (struct MinNode *)&nb->modules.mlh_Head;

@@ -29,10 +29,10 @@ NC_KERNEL(rotozoom)
             NC_U32 ui = ((NC_U32)u >> 16) & SRC_MASK, vi = ((NC_U32)v >> 16) & SRC_MASK;
             NC_U32 ui1 = (ui + 1) & SRC_MASK, vi1 = (vi + 1) & SRC_MASK;
             NC_U32 fu = ((NC_U32)u >> 8) & 0xff, fv = ((NC_U32)v >> 8) & 0xff;
-            NC_U32 top = mix(src[vi * SRC_SIZE + ui], src[vi * SRC_SIZE + ui1], fu);
-            NC_U32 bottom = mix(src[vi1 * SRC_SIZE + ui], src[vi1 * SRC_SIZE + ui1], fu);
+            NC_U32 top = mix(NC_GET32(&src[vi * SRC_SIZE + ui]), NC_GET32(&src[vi * SRC_SIZE + ui1]), fu);
+            NC_U32 bottom = mix(NC_GET32(&src[vi1 * SRC_SIZE + ui]), NC_GET32(&src[vi1 * SRC_SIZE + ui1]), fu);
 
-            dst[x] = mix(top, bottom, fv);
+            NC_PUT32(&dst[x], mix(top, bottom, fv));
         }
     }
     return 0;
@@ -66,8 +66,9 @@ NC_KERNEL(filter)
         for (x = 0; x < width; x++)
         {
             NC_U32 xl = x > 0 ? x - 1 : x, xr = x + 1 < width ? x + 1 : x;
-            NC_U32 a = r0[xl], b = r0[x], c = r0[xr], d = r1[xl], e = r1[x], f = r1[xr],
-                   g = r2[xl], h = r2[x], i = r2[xr];
+            NC_U32 a = NC_GET32(&r0[xl]), b = NC_GET32(&r0[x]), c = NC_GET32(&r0[xr]), d = NC_GET32(&r1[xl]),
+                   e = NC_GET32(&r1[x]), f = NC_GET32(&r1[xr]), g = NC_GET32(&r2[xl]), h = NC_GET32(&r2[x]),
+                   i = NC_GET32(&r2[xr]);
             NC_S32 red, green, blue;
 
 #define CH(px, s)   ((NC_S32)(((px) >> (s)) & 0xff))

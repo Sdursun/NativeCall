@@ -6,7 +6,10 @@
 #define MINIMP3_ONLY_MP3
 /* plain C on both sides: minimp3's NEON code gives wrong samples on big-endian AArch64 */
 #define MINIMP3_NO_SIMD
+/* minimp3's structures are its own: the PC's layout there (kernel.h) */
+NC_LOCAL_STRUCTS_BEGIN
 #include "minimp3.h"
+NC_LOCAL_STRUCTS_END
 
 typedef char mp3_state_fits[sizeof(mp3dec_t) <= MP3_STATE_SIZE ? 1 : -1];
 
@@ -43,6 +46,7 @@ NC_KERNEL(mp3_decode)
         pos += (NC_U32)info.frame_bytes;
         if (n > 0)
         {
+            nc_to_68k16(out, (NC_U32)(n * info.channels));     /* the 68k plays them */
             out += n * info.channels;
             samples += (NC_U32)n;
             hz = (NC_U32)info.hz;

@@ -3,12 +3,13 @@
 #   m68k-amigaos-gcc 16.2, NDK 3.2, sfdc, fd2pragma, vasm     (base image)
 #   VBCC 0.9h patch 3 + vlink 0.18a, m68k-amigaos target       (built below)
 #   aarch64-linux-gnu-gcc-14 for big-endian native modules     (Ubuntu package)
+#   x86_64-w64-mingw32-gcc for x64 modules under WinUAE        (Ubuntu package, sdk/x64)
 #
 # docker build -t nativecall-sdk:1 sdk/docker
 FROM ghcr.io/rondoval/amiga-build-container:gcc-v16.2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc-14-aarch64-linux-gnu binutils-aarch64-linux-gnu curl ca-certificates build-essential \
+        gcc-14-aarch64-linux-gnu binutils-aarch64-linux-gnu gcc-mingw-w64-x86-64-win32 binutils-mingw-w64-x86-64 curl ca-certificates build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 ENV VBCC=/opt/vbcc

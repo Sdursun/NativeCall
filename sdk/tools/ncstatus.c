@@ -317,6 +317,14 @@ static const char *core_name(int i, ULONG flags)
     return (flags & NC_CORE_HELPER) ? helper[i] : plain[i];
 }
 
+/* WinUAE x64: "core" 0 is the emulation thread, 1 the PC's worker threads together */
+static const char *x64_core_name(int i)
+{
+    static const char *names[4] = { "Emulation", "PC threads", "-", "-" };
+
+    return names[i];
+}
+
 static void update(void)
 {
     static char state[160], detail[200], totals[200];
@@ -370,16 +378,28 @@ static void update(void)
             if (s.core[i].flags & NC_CORE_NATIVE)
                 sprintf(core_text[i], "%lu %%", (unsigned long)percent);
             else
-                strcpy(core_text[i], "used by Emu68");
+                strcpy(core_text[i], (s.features & NC_FEAT_X64) ? "-" : "used by Emu68");
             set(gauge_core[i], MUIA_Gauge_Current, percent);
             set(gauge_core[i], MUIA_Gauge_InfoText, (ULONG)core_text[i]);
-            set(label_core[i], MUIA_Text_Contents, (ULONG)core_name(i, s.core[i].flags));
+            set(label_core[i], MUIA_Text_Contents,
+                (ULONG)((s.features & NC_FEAT_X64) ? x64_core_name(i) : core_name(i, s.core[i].flags)));
         }
-        sprintf(state, "\33bActive:\33n hypervisor %lu, nativecall.library %lu.%lu", (unsigned long)s.hv_version,
-                (unsigned long)NativeCallBase->lib_Version, (unsigned long)NativeCallBase->lib_Revision);
-        sprintf(detail, "%lu ARM cores run native code (%lu helper%s). Time limit: %s.",
-                (unsigned long)(1 + helpers), (unsigned long)helpers, helpers == 1 ? "" : "s",
-                (s.features & NC_FEAT_TIMEOUT) ? "works" : "not available");
+        if (s.features & NC_FEAT_X64)
+        {
+            /* WinUAE: the kernels run on the PC (library 1.8, sdk/x64) */
+            sprintf(state, "\33bActive:\33n WinUAE x64 (kernels on the PC), nativecall.library %lu.%lu",
+                    (unsigned long)NativeCallBase->lib_Version, (unsigned long)NativeCallBase->lib_Revision);
+            sprintf(detail, "%lu PC threads run native code. Time limit: %s.", (unsigned long)NC_Cores(),
+                    (s.features & NC_FEAT_TIMEOUT) ? "works" : "not available");
+        }
+        else
+        {
+            sprintf(state, "\33bActive:\33n hypervisor %lu, nativecall.library %lu.%lu", (unsigned long)s.hv_version,
+                    (unsigned long)NativeCallBase->lib_Version, (unsigned long)NativeCallBase->lib_Revision);
+            sprintf(detail, "%lu ARM cores run native code (%lu helper%s). Time limit: %s.",
+                    (unsigned long)(1 + helpers), (unsigned long)helpers, helpers == 1 ? "" : "s",
+                    (s.features & NC_FEAT_TIMEOUT) ? "works" : "not available");
+        }
         sprintf(totals, "Native calls: %lu per second, %lu since the Pi started. Jobs running: %lu. Faults: %lu.",
                 (unsigned long)(elapsed_us ? (ULONG)((unsigned long long)dcalls * 1000000ULL / elapsed_us) : 0),
                 (unsigned long)calls, (unsigned long)s.jobs, (unsigned long)s.faults);

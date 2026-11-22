@@ -1,6 +1,8 @@
 NAME    := mp3demo
 SRCS    := main.c
 KERNELS := mp3demo_kernels.c
+# also the x64 module for WinUAE (sdk/x64/README.md)
+NC_X64  := 1
 NC_SDK  ?= ../..
 CC68    ?= vbcc
 # VBCC 0.9h and the decoder: -O2 stops with an internal error, -O1 builds a 68k version that

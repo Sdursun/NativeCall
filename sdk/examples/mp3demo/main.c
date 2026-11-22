@@ -110,11 +110,13 @@ static BOOL load_file(void)
 /* ---- BENCH ---- */
 
 /* Decodes up to max_frames MP3 frames from the start of the file into out, with the 68k kernel
-   or natively. Returns the samples per channel. */
+   or natively. Returns the samples per channel; *hz and *channels of the sound (0 if none). */
 static ULONG decode_all(BOOL native, WORD *out, ULONG max_frames, struct Mp3Params *p, struct Mp3Result *r,
-                        double *seconds)
+                        double *seconds, ULONG *hz, ULONG *channels)
 {
     ULONG pos = file_start, frames = 0, samples = 0;
+
+    *hz = *channels = 0;
     double t0 = now_s();
 
     p->range.from = 0;
@@ -139,6 +141,12 @@ static ULONG decode_all(BOOL native, WORD *out, ULONG max_frames, struct Mp3Para
             break;
         }
         p->start = 0;
+        /* the call that meets the end of the file decodes nothing and says 0 Hz */
+        if (r->samples)
+        {
+            *hz = r->hz;
+            *channels = r->channels;
+        }
         pos += r->consumed;
         frames += r->frames;
         samples += r->samples;
@@ -170,9 +178,7 @@ static int bench(void)
     }
     printf("Decoding up to %lu s of %s on the 68k...\n", (unsigned long)seconds, file_name);
     fflush(stdout);
-    samples = decode_all(FALSE, out68k, max_frames, p, r, &t68k);
-    hz = r->hz;
-    channels = r->channels;
+    samples = decode_all(FALSE, out68k, max_frames, p, r, &t68k, &hz, &channels);
     if (!samples || !hz)
     {
         printf("No MP3 sound found in the file\n");
@@ -188,13 +194,17 @@ static int bench(void)
     {
         struct NCKernelStats ks;
 
-        n = decode_all(TRUE, outnat, max_frames, p, r, &tnat);
+        ULONG nhz, nch;
+
+        n = decode_all(TRUE, outnat, max_frames, p, r, &tnat, &nhz, &nch);
         printf("  native   %8.0f ms  = %6.1f x real time  (%.1fx faster)\n", 1000 * tnat, audio / tnat, t68k / tnat);
         if (nc_stats(k, NCK_mp3_decode, &ks, FALSE) && ks.calls)
             printf("           %lu native calls, %lu us each on average, the longest %lu us\n",
                    (unsigned long)ks.calls, (unsigned long)(ks.total_us / ks.calls), (unsigned long)ks.max_us);
-        if (n != samples)
-            printf("\n  DIFFERENT LENGTH: 68k %lu samples, native %lu\n", (unsigned long)samples, (unsigned long)n);
+        if (n != samples || nhz != hz || nch != channels)
+            printf("\n  DIFFERENT SOUND: 68k %lu samples at %lu Hz x %lu, native %lu at %lu Hz x %lu\n",
+                   (unsigned long)samples, (unsigned long)hz, (unsigned long)channels, (unsigned long)n,
+                   (unsigned long)nhz, (unsigned long)nch);
         else
         {
             for (i = 0; i < samples * channels; i++)

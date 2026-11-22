@@ -1,6 +1,6 @@
 /*
-    stdlib.h for native kernels (no libc on the Pi side). Only used when building the .narm
-    module; the 68k build of a kernel gets its compiler's own.
+    stdlib.h for native kernels (no libc on the Pi side, nor in the x64 modules for WinUAE). Only
+    used when building the .narm and .nx64 modules; the 68k build of a kernel gets its compiler's own.
 
     malloc() & co. take memory from the heap chosen with nc_heap_select() (nativecall/nc_heap.h):
     a block the 68k program provides. Without a selected heap they return NULL.

@@ -29,3 +29,19 @@ _nc_trigger:
                 move.l  (sp)+,d1
                 move.l  (sp)+,d0
                 rte
+
+; nc_uni_call(a6 = uaenative.library, d0 = function handle, a0 = 12 longs for d1-d7/a1-a5)
+;
+; uaenative.library's call_function (LVO -48): the function in a0, d1-d7/a1-a5 passed on to the
+; host function in its struct uni; d0 = its result. Used for the x64 backend under WinUAE.
+
+_LVOUniCallFunction equ -48
+
+                xdef    _nc_uni_call
+_nc_uni_call:
+                movem.l d2-d7/a2-a6,-(sp)
+                movem.l (a0),d1-d7/a1-a5
+                move.l  d0,a0
+                jsr     _LVOUniCallFunction(a6)
+                movem.l (sp)+,d2-d7/a2-a6
+                rts

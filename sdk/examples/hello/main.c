@@ -194,7 +194,7 @@ int main(void)
     {
         static char text[NC_LOG_SIZE + 1];
         struct NCFaultInfo fi;
-        ULONG pos = 0, n, j, in_module = 0;
+        ULONG pos = 0, n, j, in_module = 0, preg = 0;
 
         if (NativeCallBase->lib_Version == 1 && NativeCallBase->lib_Revision < 6)
             printf("LOG: needs nativecall.library 1.6\n");
@@ -214,6 +214,15 @@ int main(void)
                 rc = RETURN_ERROR;
             }
 
+            /* the bad pointer is in x0 on the ARM; on the PC (WinUAE x64, library 1.8) in rcx,
+               which NCFaultInfo.x[1] holds there */
+            {
+                struct NCStats st;
+
+                if ((NativeCallBase->lib_Version > 1 || NativeCallBase->lib_Revision >= 8) && NC_GetStats(&st)
+                    && (st.features & NC_FEAT_X64))
+                    preg = 1;
+            }
             r = nc_call(k, NCK_deepfault, p);
             printf("LOG: deepfault status 0x%lx\n", (unsigned long)nc_status(k));
             n = NC_ReadLog(text, NC_LOG_SIZE, &pos);
@@ -230,11 +239,16 @@ int main(void)
                         printf(" 0x%lx", (unsigned long)fi.backtrace[j]);
                         in_module++;
                     }
-                printf("\n  x0 0x%08lx%08lx (the bad pointer), x30 0x%08lx%08lx\n", (unsigned long)fi.x[0][0],
-                       (unsigned long)fi.x[0][1], (unsigned long)fi.x[30][0], (unsigned long)fi.x[30][1]);
+                if (preg)
+                    printf("\n  rcx 0x%08lx%08lx (the bad pointer)\n", (unsigned long)fi.x[1][0],
+                           (unsigned long)fi.x[1][1]);
+                else
+                    printf("\n  x0 0x%08lx%08lx (the bad pointer), x30 0x%08lx%08lx\n", (unsigned long)fi.x[0][0],
+                           (unsigned long)fi.x[0][1], (unsigned long)fi.x[30][0], (unsigned long)fi.x[30][1]);
             }
             /* where (df3), the link register (df2), then df1 and deepfault from the frames */
-            if (nc_status(k) != NC_ST_FAULT || in_module < 4 || fi.far_lo != 8 || fi.x[0][1] != 8)
+            if (nc_status(k) != NC_ST_FAULT || in_module < 4 || fi.far_lo != 8 || fi.x[preg][0] != 0
+                || fi.x[preg][1] != 8)
             {
                 printf("LOG: fault details WRONG\n");
                 rc = RETURN_ERROR;

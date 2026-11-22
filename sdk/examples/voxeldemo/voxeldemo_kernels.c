@@ -35,7 +35,7 @@ NC_KERNEL(terrain)
                 int v;
 
                 for (i = 0; i < WAVES; i++)
-                    h += (float)waves[i][3] * sine[(NC_U32)(waves[i][0] * (int)x + waves[i][1] * (int)y + waves[i][2]) & MAP_MASK];
+                    h += (float)waves[i][3] * NC_GETF(&sine[(NC_U32)(waves[i][0] * (int)x + waves[i][1] * (int)y + waves[i][2]) & MAP_MASK]);
                 /* valleys become wide, peaks sharp */
                 h = h * (1.0f / 189.0f);                /* -1..1 */
                 h = 0.5f + 0.5f * h;
@@ -61,7 +61,7 @@ NC_KERNEL(terrain)
                 if (h <= WATER)
                 {
                     /* sea: ripples from two of the waves */
-                    int ripple = (int)(24.0f * sine[(NC_U32)(37 * (int)x + 11 * (int)y) & MAP_MASK]);
+                    int ripple = (int)(24.0f * NC_GETF(&sine[(NC_U32)(37 * (int)x + 11 * (int)y) & MAP_MASK]));
 
                     r = 24;
                     g = 78 + ripple / 2;
@@ -72,8 +72,8 @@ NC_KERNEL(terrain)
                 else if (h < 120)            { r = 60 + (h - WATER) / 2; g = 132 - (h - WATER) / 3; b = 44; }
                 else if (h < 170)            { r = 112 + (h - 120) / 2; g = 100 + (h - 120) / 3; b = 78; }
                 else                         { r = 232; g = 236; b = 244; }    /* snow */
-                cm[y * MAP_SIZE + x] = DEMO_RGB(clamp255(r * light >> 8), clamp255(g * light >> 8),
-                                                clamp255(b * light >> 8));
+                NC_PUT32(&cm[y * MAP_SIZE + x], DEMO_RGB(clamp255(r * light >> 8), clamp255(g * light >> 8),
+                                                clamp255(b * light >> 8)));
             }
         }
     }
@@ -112,7 +112,7 @@ NC_KERNEL(voxel)
                 sy = 0;
             if (sy < top)
             {
-                NC_U32 c = cm[at], packed;
+                NC_U32 c = NC_GET32(&cm[at]), packed;
                 int f = (int)(z * inv_dist);        /* 0..256: how much haze */
                 int r = (int)((c >> 16) & 0xff), g = (int)((c >> 8) & 0xff), b = (int)(c & 0xff);
                 NC_U8 *dst = col + (NC_U32)sy * stride;
@@ -135,7 +135,7 @@ NC_KERNEL(voxel)
             NC_U8 *dst = col;
 
             for (y = 0; y < top; y++, dst += stride)
-                demo_put(dst, sky[y], bpp);
+                demo_put(dst, NC_GET32(&sky[y]), bpp);
         }
     }
     return drawn;

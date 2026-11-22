@@ -5,7 +5,8 @@
 Kickstart 47.115. Emu68 reports itself as a 68040.
 
 All figures come from one machine. Each table states what was running at the time; versions moved on
-during the project, so older tables were not repeated with the newest versions.
+during the project, so older tables were not repeated with the newest versions. The WinUAE figures
+(release 1.8) come from one PC, see that section.
 
 ## Summary
 
@@ -31,6 +32,48 @@ frame rate, a faster CPU part gains almost nothing.
 The gains of the graphics demos compare the time to compute a frame; the copy to the screen is the
 same on both sides. The gain also depends on how the 68k side was compiled: see "68k compiler flags"
 below.
+
+## Release 1.8 (22.11.2026; hypervisor 8, library 1.8)
+
+**On the A1200** library 1.8 behaves as 1.7: the graphics demos gave the figures of the table below within
+a few percent (GCC: `ncdemo` 50.9 / 155.9 / 198.0 fps, `mandeldemo` NEON MP 592.9 Miter/s, `raydemo` 18.8x,
+`voxeldemo` 5.6x, `nbodydemo` 11.0x, `filterdemo` 15.7x; VBCC `raydemo` 33.2x). `mp3demo BENCH` with a 20 s
+test file: GCC 7.2x, VBCC 12.2x. `cputest`: native 1.4x (primes) and 1.5x (Mandelbrot), NEON 4.2x.
+
+**Under WinUAE, kernels on the PC** (WinUAE 6.1 beta, 68060 with JIT, `native_code=true`; a PC with 24
+logical processors; the pool uses 23):
+
+`mandeldemo`, the v1.7.0 binaries unchanged, with library 1.8 (Miter/s; in brackets the factor over
+WinUAE's 68k):
+
+| | 68k | x64, 1 thread | x64, all threads |
+|---|---:|---:|---:|
+| 640x480, threads started for every call (first attempt) | 54.2 | 580.5 (10.7x) | 63.4 (1.2x) |
+| 640x480, thread pool | 58.5 | 511.9 (8.8x) | 6043.6 (103x) |
+| 1280x720, release binaries, embedded module | 57.5 | | 8146 (142x) |
+
+The graphics demos at 1280x720 (release binaries, GCC; fps of the 68k / one thread / all threads):
+
+| Demo | 68k | x64 | x64, 23 threads | compute, all threads vs 68k |
+|---|---:|---:|---:|---:|
+| `ncdemo` | 95.6 | 499.6 | 946.5 | 9.9x (whole frame) |
+| `raydemo` | 1.9 | 16.7 | 147.0 | 96.5x |
+| `filterdemo` | 4.9 | 59.7 | 420.7 | 129.6x |
+| `voxeldemo` | 21.7 | 314.0 | 344.1 | 24.9x |
+| `nbodydemo` | 13.7 | 147.2 | 693.2 | 103.9x |
+
+| Other | Result |
+|---|---|
+| `mp3demo BENCH`, 20 s | 68k 244 ms, x64 17 ms (14.4x; VBCC 26.1x); 1219 of 1 769 472 samples differ by 1 |
+| `nbodydemo` step, 200 steps of 1500 bodies | positions within 2.9e-5 of the 68k's (Pi: 2.96e-5); one thread and the pool bit-identical |
+| `hello TIME` | `nc_call` 0.86 µs, `nc_run` 1.37 µs, `nc_run_mp` 70 µs (waking the pool), `nc_now_us` 1.03 µs |
+| time limit 20 ms | `0x87` after 17 to 32 ms (a 10 ms watchdog) |
+| clock during a 1 s call | PC clock and `nc_now_us` 1.047 s, `GetSysTime` 0.175 s |
+
+The PC computes a frame tens of times faster than WinUAE's 68k; the emulation then becomes the limit
+(the copy to the screen, the 68k part of the frame). Timings from timer.device miss the time kernels run
+on the PC, so the frame rates of programs built with an older SDK look too high; this SDK's `nc_now_us`
+reads the PC's clock.
 
 ## Release 1.7 (13.11.2026; hypervisor 8, library 1.7, GCC 16.2.1b, VBCC 0.9h)
 

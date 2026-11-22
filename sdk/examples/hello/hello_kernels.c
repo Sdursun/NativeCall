@@ -2,7 +2,7 @@
 #include <nativecall/nc_heap.h>
 #include <string.h>
 
-#if NC_NATIVE
+#if NC_NATIVE || NC_X64
 #include <stdlib.h>     /* sdk/native/include: malloc() on a nc_heap */
 #endif
 
@@ -15,7 +15,7 @@ NC_KERNEL(add)
 
 NC_KERNEL(fault)
 {
-#if NC_NATIVE
+#if NC_NATIVE || NC_X64
     uintptr_t addr = 0x4;
 
     (void)params;
@@ -33,7 +33,7 @@ NC_KERNEL(copy)
 
     memcpy(dst, NC_PTR(NC_U32, p->src), p->count * sizeof(NC_U32));
     for (i = 0; i < p->count; i++)
-        sum += dst[i];
+        sum += NC_GET32(&dst[i]);
     return sum;
 }
 
@@ -52,7 +52,7 @@ NC_KERNEL(mark)
     {
         for (w = 0; w < p->work; w++)
             ;
-        dst[i] = core + 1;
+        NC_PUT32(&dst[i], core + 1);
     }
     return p->range.to - p->range.from;
 }
@@ -106,7 +106,7 @@ NC_KERNEL(heap)
     for (i = 0; i < 64; i++)
         nc_heap_free(h, slot[i]);
 
-#if NC_NATIVE
+#if NC_NATIVE || NC_X64
     {
         /* malloc() of sdk/native/include/stdlib.h on the same heap */
         char *a, *b;
@@ -136,7 +136,7 @@ NC_KERNEL(heap)
 NC_KERNEL(spin)
 {
     (void)params;
-#if NC_NATIVE
+#if NC_NATIVE || NC_X64
     for (;;)
         __asm__ volatile("" ::: "memory");
 #else
@@ -160,7 +160,7 @@ NC_KERNEL(logtest)
     return 1;
 }
 
-#if NC_NATIVE
+#if NC_NATIVE || NC_X64
 /* Not inlined, and each one does something after its call: no tail calls, real frames */
 static __attribute__((noinline)) NC_U32 df3(volatile NC_U32 *p)
 {
@@ -184,7 +184,7 @@ static __attribute__((noinline)) NC_U32 df1(volatile NC_U32 *p)
 
 NC_KERNEL(deepfault)
 {
-#if NC_NATIVE
+#if NC_NATIVE || NC_X64
     uintptr_t addr = 0x8;
 
     (void)params;

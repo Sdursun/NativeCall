@@ -66,6 +66,8 @@ static ULONG crc32(const UBYTE *p, ULONG n)
     return ~crc;
 }
 
+static BOOL lib_is_x64(void);
+
 static BOOL lib_has_mem_load(void)
 {
     return NativeCallBase->lib_Version > 1 || NativeCallBase->lib_Revision >= 2;
@@ -147,8 +149,15 @@ struct NCKernels *nc_open_path(const struct NCKernelSet *set, CONST_STRPTR path)
         /* development override: ENV:NativeCall/ModuleDir, no version check */
         k->module = load_file((CONST_STRPTR)file, 0, &status);
     else if (set->image && set->image_size && *set->image_size && lib_has_mem_load())
-        /* the copy embedded in the program: always the right version */
-        k->module = NC_LoadModuleMem(set->image, *set->image_size);
+    {
+        /* the copy embedded in the program: always the right version. Under WinUAE's x64
+           backend the embedded .nx64 (library 1.8 takes one as it takes a .narm); without it
+           the library looks for a .nx64 file that belongs to the .narm. */
+        if (set->x64_image && set->x64_image_size && *set->x64_image_size && lib_is_x64())
+            k->module = NC_LoadModuleMem(set->x64_image, *set->x64_image_size);
+        if (!k->module)
+            k->module = NC_LoadModuleMem(set->image, *set->image_size);
+    }
     else
     {
         strcpy(file, "PROGDIR:");
@@ -350,21 +359,41 @@ BOOL nc_stats(struct NCKernels *k, ULONG index, struct NCKernelStats *stats, BOO
     return NC_GetKernelStats(k->entry[index], stats, reset);
 }
 
-/* Fast RAM regions native code can see (hypervisor/hv.c: from 16 MB up), read once */
+/* Memory regions native code can see, read once (again when the library comes or goes):
+   on the Pi Fast RAM from 16 MB up (hypervisor/hv.c); under WinUAE with the x64 backend
+   (library 1.8, NC_FEAT_X64) all of the Amiga's RAM, chip RAM too (sdk/x64/README.md) */
 #define NC_REGIONS 8
 static ULONG region_lo[NC_REGIONS], region_hi[NC_REGIONS], regions = 0xffffffffUL;
+static struct Library *regions_lib;     /* NativeCallBase when they were read */
+
+static BOOL lib_is_x64(void)
+{
+    struct NCStats s;
+
+    return (BOOL)(NativeCallBase && (NativeCallBase->lib_Version > 1 || NativeCallBase->lib_Revision >= 8)
+                  && NC_Available() && NC_GetStats(&s) && (s.features & NC_FEAT_X64));
+}
 
 static void read_regions(void)
 {
     struct MemHeader *mh;
     ULONG n = 0;
+    BOOL x64 = lib_is_x64();
 
+    regions_lib = NativeCallBase;
     Forbid();
     for (mh = (struct MemHeader *)SysBase->MemList.lh_Head; mh->mh_Node.ln_Succ && n < NC_REGIONS;
          mh = (struct MemHeader *)mh->mh_Node.ln_Succ)
     {
         ULONG lo = (ULONG)mh->mh_Lower, hi = (ULONG)mh->mh_Upper;
 
+        if (x64)
+        {
+            region_lo[n] = lo;
+            region_hi[n] = hi;
+            n++;
+            continue;
+        }
         if (!(mh->mh_Attributes & MEMF_FAST) || hi <= 0x01000000UL)
             continue;
         region_lo[n] = lo < 0x01000000UL ? 0x01000000UL : lo;
@@ -381,7 +410,7 @@ BOOL nc_addr_ok(CONST_APTR memory, ULONG size)
 
     if (end < start)
         return FALSE;
-    if (regions == 0xffffffffUL)
+    if (regions == 0xffffffffUL || regions_lib != NativeCallBase)
         read_regions();
     for (i = 0; i < regions; i++)
         if (start >= region_lo[i] && end <= region_hi[i])
@@ -393,7 +422,7 @@ BOOL nc_addr_limits(ULONG *lo, ULONG *hi)
 {
     ULONG i, best = 0xffffffffUL;
 
-    if (regions == 0xffffffffUL)
+    if (regions == 0xffffffffUL || regions_lib != NativeCallBase)
         read_regions();
     for (i = 0; i < regions; i++)
         if (best == 0xffffffffUL || region_hi[i] - region_lo[i] > region_hi[best] - region_lo[best])
@@ -412,8 +441,17 @@ BOOL nc_addr_limits(ULONG *lo, ULONG *hi)
 
 static UWORD clock_code[26];
 static volatile ULONG clock_out[4];     /* high, low, high again, frequency */
-static int clock_mode;                  /* 0: not set up, 1: Emu68, 2: timer.device */
+static int clock_mode;                  /* 0: not set up, 1: Emu68, 2: timer.device, 3: the PC (x64) */
 static struct Device *clock_timer;
+static struct Library *clock_lib;       /* NativeCallBase when the clock was chosen */
+
+/*
+   WinUAE with the x64 backend (library 1.8): the emulation stands still while a kernel runs on
+   the PC, and the Amiga's clocks see only part of that time (a 1 s call looked like 85 ms to
+   timer.device). nc_now_us() then reads the PC's clock (NC_GetStats, microseconds), so that
+   times around native calls are right. The clock is chosen again when the library is opened or
+   closed: take the two ends of a measurement while the same kernels are open.
+*/
 
 static UWORD *clock_store(UWORD *c, UWORD reg_word, volatile ULONG *dst)
 {
@@ -429,6 +467,7 @@ static UWORD *clock_store(UWORD *c, UWORD reg_word, volatile ULONG *dst)
 
 static void clock_setup(void)
 {
+    clock_lib = NativeCallBase;
     if (OpenResource((CONST_STRPTR)"devicetree.resource"))
     {
         UWORD *c = clock_code;
@@ -442,6 +481,11 @@ static void clock_setup(void)
         clock_mode = 1;
         return;
     }
+    if (lib_is_x64())
+    {
+        clock_mode = 3;
+        return;
+    }
     Forbid();
     clock_timer = (struct Device *)FindName(&SysBase->DeviceList, (CONST_STRPTR)"timer.device");
     Permit();
@@ -450,8 +494,23 @@ static void clock_setup(void)
 
 void nc_now_ticks(ULONG *hi, ULONG *lo, ULONG *freq)
 {
-    if (!clock_mode)
+    if (!clock_mode || (clock_mode != 1 && clock_lib != NativeCallBase))
         clock_setup();
+    if (clock_mode == 3)
+    {
+        struct NCStats s;
+
+        if (NativeCallBase && NC_GetStats(&s) && s.freq)
+        {
+            *hi = s.now_hi;
+            *lo = s.now_lo;
+            *freq = s.freq;
+            return;
+        }
+        clock_mode = 0;     /* gone: choose again next time */
+        *hi = *lo = *freq = 0;
+        return;
+    }
     if (clock_mode == 1)
     {
         do
